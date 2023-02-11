@@ -216,8 +216,8 @@ func allAudioSourcesToDisplay(theRobot robot.Robot) map[string]gostream.AudioSou
 
 // A Service controls the web server for a robot.
 type Service interface {
-	// Start starts the web server
-	Start(context.Context, weboptions.Options) error
+	// Serve serves the web server. This will block until the context is cancelled or an error occurs.
+	Serve(context.Context, weboptions.Options) error
 
 	// Stop stops the main web service (but leaves module server socket running.)
 	Stop()
@@ -276,17 +276,24 @@ type webService struct {
 	activeBackgroundWorkers sync.WaitGroup
 }
 
-// Start starts the web server, will return an error if server is already up.
-func (svc *webService) Start(ctx context.Context, o weboptions.Options) error {
+// Serve starts the web server, will return an error if server is already up.
+func (svc *webService) Serve(ctx context.Context, o weboptions.Options) (err error) {
 	svc.mu.Lock()
-	defer svc.mu.Unlock()
 	if svc.cancelFunc != nil {
+		svc.mu.Unlock()
 		return errors.New("web server already started")
 	}
 	cancelCtx, cancelFunc := context.WithCancel(ctx)
 	svc.cancelFunc = cancelFunc
+	svc.mu.Unlock()
 
-	if err := svc.runWeb(cancelCtx, o); err != nil {
+	defer func() {
+		if err != nil {
+			err = utils.FilterOutError(err, context.Canceled)
+		}
+	}()
+
+	if err := svc.serve(cancelCtx, o); err != nil {
 		cancelFunc()
 		svc.cancelFunc = nil
 		return err
@@ -294,31 +301,30 @@ func (svc *webService) Start(ctx context.Context, o weboptions.Options) error {
 	return nil
 }
 
-// RunWeb starts the web server on the robot with web options and blocks until we cancel the context.
-func RunWeb(ctx context.Context, r robot.LocalRobot, o weboptions.Options, logger golog.Logger) (err error) {
-	defer func() {
-		if err != nil {
-			err = utils.FilterOutError(err, context.Canceled)
-			if err != nil {
-				logger.Errorw("error running web", "error", err)
-			}
-		}
-	}()
-
-	if err := r.StartWeb(ctx, o); err != nil {
-		return err
-	}
-	<-ctx.Done()
-	return ctx.Err()
+// ServeWeb starts the web server on the robot with web options and blocks until we cancel the context.
+func ServeWeb(ctx context.Context, r robot.LocalRobot, o weboptions.Options, logger golog.Logger) error {
+	return r.ServeWeb(ctx, o)
 }
 
-// RunWebWithConfig starts the web server on the robot with a robot config and blocks until we cancel the context.
-func RunWebWithConfig(ctx context.Context, r robot.LocalRobot, cfg *config.Config, logger golog.Logger) error {
+// ServeInBackground serves the web server on the robot in the background. It returns a wait group that can be waited on
+// to make sure it is cleaned up.
+func ServeInBackground(ctx context.Context, r robot.LocalRobot, o weboptions.Options, logger golog.Logger) *sync.WaitGroup {
+	var activeBackgroundWorkers *sync.WaitGroup
+	activeBackgroundWorkers.Add(1)
+	utils.PanicCapturingGo(func() {
+		defer activeBackgroundWorkers.Done()
+		ServeWeb(ctx, r, o, logger)
+	})
+	return activeBackgroundWorkers
+}
+
+// ServeWithConfig starts the web server on the robot with a robot config and blocks until we cancel the context.
+func ServeWithConfig(ctx context.Context, r robot.LocalRobot, cfg *config.Config, logger golog.Logger) error {
 	o, err := weboptions.FromConfig(cfg)
 	if err != nil {
 		return err
 	}
-	return RunWeb(ctx, r, o, logger)
+	return ServeWeb(ctx, r, o, logger)
 }
 
 // Address returns the address the service is listening on.
@@ -666,9 +672,9 @@ func (svc *webService) installWeb(mux *goji.Mux, theRobot robot.Robot, options w
 	return nil
 }
 
-// runWeb takes the given robot and options and runs the web server. This function will
-// block until the context is done.
-func (svc *webService) runWeb(ctx context.Context, options weboptions.Options) (err error) {
+// serve takes the given robot and options and runs the web server. This function will
+// block until the context is done or an error occurs.
+func (svc *webService) serve(ctx context.Context, options weboptions.Options) (err error) {
 	if options.Network.BindAddress != "" && options.Network.Listener != nil {
 		return errors.New("may only set one of network bind address or listener")
 	}
@@ -812,19 +818,15 @@ func (svc *webService) runWeb(ctx context.Context, options weboptions.Options) (
 	}
 	svc.logger.Infow("serving", urlFields...)
 
-	svc.activeBackgroundWorkers.Add(1)
-	utils.PanicCapturingGo(func() {
-		defer svc.activeBackgroundWorkers.Done()
-		var serveErr error
-		if options.Secure {
-			serveErr = httpServer.ServeTLS(listener, options.Network.TLSCertFile, options.Network.TLSKeyFile)
-		} else {
-			serveErr = httpServer.Serve(listener)
-		}
-		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			svc.logger.Errorw("error serving http", "error", serveErr)
-		}
-	})
+	var serveErr error
+	if options.Secure {
+		serveErr = httpServer.ServeTLS(listener, options.Network.TLSCertFile, options.Network.TLSKeyFile)
+	} else {
+		serveErr = httpServer.Serve(listener)
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		svc.logger.Errorw("error serving http", "error", serveErr)
+	}
 	return err
 }
 

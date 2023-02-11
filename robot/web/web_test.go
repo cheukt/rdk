@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,17 @@ var resources = []resource.Name{arm.Named(arm1String)}
 
 var pos = spatialmath.NewPoseFromPoint(r3.Vector{X: 1, Y: 2, Z: 3})
 
+func serveInBackground(t *testing.T, ctx context.Context, svc web.Service, o weboptions.Options) *sync.WaitGroup {
+	t.Helper()
+	var activeBackgroundWorkers sync.WaitGroup
+	activeBackgroundWorkers.Add(1)
+	utils.PanicCapturingGo(func() {
+		defer activeBackgroundWorkers.Done()
+		err := svc.Serve(ctx, o)
+		test.That(t, err, test.ShouldBeNil)
+	})
+	return &activeBackgroundWorkers
+}
 func TestWebStart(t *testing.T) {
 	logger := golog.NewTestLogger(t)
 	ctx, injectRobot := setupRobotCtx(t)
@@ -64,8 +76,8 @@ func TestWebStart(t *testing.T) {
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -75,12 +87,13 @@ func TestWebStart(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, arm1Position, test.ShouldResemble, pos)
 
-	err = svc.Start(context.Background(), weboptions.New())
+	err = svc.Serve(context.Background(), weboptions.New())
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "already started")
 
 	err = utils.TryClose(context.Background(), svc)
 	test.That(t, err, test.ShouldBeNil)
+
 	test.That(t, conn.Close(), test.ShouldBeNil)
 }
 
@@ -105,18 +118,20 @@ func TestModule(t *testing.T) {
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "already started")
 
-	options, _, _ := robottestutils.CreateBaseOptionsAndListener(t)
+	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 
-	err = svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
-	conn2, err := rgrpc.Dial(context.Background(), svc.Address(), logger)
+	conn2, err := rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
 	arm2 := arm.NewClientFromConn(context.Background(), conn2, arm1String, logger)
 
 	arm2Position, err := arm2.EndPosition(ctx, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, arm2Position, test.ShouldResemble, pos)
+
+	test.That(t, svc.Address(), test.ShouldEqual, svc.Address())
 
 	svc.Stop()
 	time.Sleep(time.Second)
@@ -146,13 +161,13 @@ func TestWebStartOptions(t *testing.T) {
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 
 	options.Network.BindAddress = "woop"
-	err := svc.Start(ctx, options)
+	err := svc.Serve(ctx, options)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "only set one of")
 	options.Network.BindAddress = ""
 
-	err = svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -227,8 +242,8 @@ func TestWebWithAuth(t *testing.T) {
 				options.BakedAuthCreds = rpc.Credentials{Type: "blah"}
 			}
 
-			err = svc.Start(ctx, options)
-			test.That(t, err, test.ShouldBeNil)
+			wg := serveInBackground(t, ctx, svc, options)
+			defer wg.Wait()
 
 			_, err = rgrpc.Dial(context.Background(), addr, logger)
 			test.That(t, err, test.ShouldNotBeNil)
@@ -400,8 +415,8 @@ func TestWebWithTLSAuth(t *testing.T) {
 	options.BakedAuthEntity = "blah"
 	options.BakedAuthCreds = rpc.Credentials{Type: "blah"}
 
-	err = svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	clientTLSConfig := options.Network.TLSConfig.Clone()
 	clientTLSConfig.Certificates = nil
@@ -531,7 +546,7 @@ func TestWebWithBadAuthHandlers(t *testing.T) {
 		},
 	}
 
-	err := svc.Start(ctx, options)
+	err := svc.Serve(ctx, options)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "do not know how")
 	test.That(t, err.Error(), test.ShouldContainSubstring, "unknown")
@@ -546,7 +561,7 @@ func TestWebWithBadAuthHandlers(t *testing.T) {
 		},
 	}
 
-	err = svc.Start(ctx, options)
+	err = svc.Serve(ctx, options)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "non-empty")
 	test.That(t, err.Error(), test.ShouldContainSubstring, "api-key")
@@ -560,8 +575,8 @@ func TestWebUpdate(t *testing.T) {
 	svc := web.New(ctx, robot, logger)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -609,8 +624,8 @@ func TestWebUpdate(t *testing.T) {
 	addr = listener.Addr().String()
 	options.Network.Listener = listener
 
-	err = svc2.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 := serveInBackground(t, ctx, svc2, options)
+	defer wg2.Wait()
 
 	conn, err = rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -676,8 +691,8 @@ func TestWebWithStreams(t *testing.T) {
 	robot.LoggerFunc = func() golog.Logger { return logger }
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 	svc := web.New(ctx, robot, logger, web.WithStreamConfig(x264.DefaultStreamConfig))
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	// Start a stream service client
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
@@ -730,8 +745,8 @@ func TestWebAddFirstStream(t *testing.T) {
 	robot.LoggerFunc = func() golog.Logger { return logger }
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 	svc := web.New(ctx, robot, logger, web.WithStreamConfig(x264.DefaultStreamConfig))
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	// Start a stream service client
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
@@ -794,8 +809,8 @@ func TestForeignResource(t *testing.T) {
 	svc := web.New(ctx, robot, logger)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	conn, err := rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -849,8 +864,8 @@ func TestForeignResource(t *testing.T) {
 	addr = listener.Addr().String()
 	options.Network.Listener = listener
 	svc = web.New(ctx, injectRobot, logger)
-	err = svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg = serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	conn, err = rgrpc.Dial(context.Background(), addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -922,8 +937,8 @@ func TestRawClientOperation(t *testing.T) {
 	svc := web.New(ctx, iRobot, logger)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err := svc.Start(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := serveInBackground(t, ctx, svc, options)
+	defer wg.Wait()
 
 	iRobot.(*inject.Robot).StatusFunc = func(ctx context.Context, resourceNames []resource.Name) ([]robot.Status, error) {
 		return []robot.Status{}, nil
@@ -933,7 +948,7 @@ func TestRawClientOperation(t *testing.T) {
 		t.Helper()
 		if expected {
 			test.That(t, md["opid"], test.ShouldHaveLength, 1)
-			_, err = uuid.Parse(md["opid"][0])
+			_, err := uuid.Parse(md["opid"][0])
 			test.That(t, err, test.ShouldBeNil)
 		} else {
 			// StreamStatus is in operations' list of filtered methods, so expect no opID.
@@ -987,8 +1002,8 @@ func TestInboundMethodTimeout(t *testing.T) {
 			svc := web.New(ctx, iRobot, logger)
 			options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 
-			err := svc.Start(ctx, options)
-			test.That(t, err, test.ShouldBeNil)
+			wg := serveInBackground(t, ctx, svc, options)
+			defer wg.Wait()
 
 			// Use an injected status function to check that the default deadline was added
 			// to the context.
@@ -1021,8 +1036,8 @@ func TestInboundMethodTimeout(t *testing.T) {
 			svc := web.New(ctx, iRobot, logger)
 			options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
 
-			err := svc.Start(ctx, options)
-			test.That(t, err, test.ShouldBeNil)
+			wg := serveInBackground(t, ctx, svc, options)
+			defer wg.Wait()
 
 			// Use an injected status function to check that the default deadline was not
 			// added to the context, and the deadline passed to GetStatus was used instead.
