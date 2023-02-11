@@ -4,14 +4,17 @@ package robottestutils
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 	"go.viam.com/test"
+	"go.viam.com/utils"
 	"go.viam.com/utils/testutils"
 
 	"go.viam.com/rdk/robot/client"
+	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
 )
 
@@ -40,4 +43,17 @@ func NewRobotClient(tb testing.TB, logger *zap.SugaredLogger, addr string, dur t
 	)
 	test.That(tb, err, test.ShouldBeNil)
 	return robotClient
+}
+
+// ServeWebInBackground serves the web service in the background
+func ServeWebInBackground(t *testing.T, ctx context.Context, svc web.Service, o weboptions.Options) *sync.WaitGroup {
+	t.Helper()
+	var activeBackgroundWorkers sync.WaitGroup
+	activeBackgroundWorkers.Add(1)
+	utils.PanicCapturingGo(func() {
+		defer activeBackgroundWorkers.Done()
+		err := svc.Serve(ctx, o)
+		test.That(t, err, test.ShouldBeNil)
+	})
+	return &activeBackgroundWorkers
 }

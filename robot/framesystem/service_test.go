@@ -19,6 +19,7 @@ import (
 	"go.viam.com/rdk/robot/framesystem"
 	framesystemparts "go.viam.com/rdk/robot/framesystem/parts"
 	robotimpl "go.viam.com/rdk/robot/impl"
+	"go.viam.com/rdk/robot/web"
 	_ "go.viam.com/rdk/services/register"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/testutils/inject"
@@ -241,8 +242,11 @@ func TestServiceWithRemote(t *testing.T) {
 	}()
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = remoteRobot.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, remoteRobot, options, logger)
+	defer func() {
+		test.That(t, remoteRobot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	o1 := &spatialmath.R4AA{math.Pi / 2., 0, 0, 1}
 	o1Cfg, err := spatialmath.NewOrientationConfig(o1)

@@ -29,6 +29,7 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot/client"
 	robotimpl "go.viam.com/rdk/robot/impl"
+	"go.viam.com/rdk/robot/web"
 	_ "go.viam.com/rdk/services/register"
 	"go.viam.com/rdk/session"
 	"go.viam.com/rdk/subtype"
@@ -161,8 +162,11 @@ func TestSessions(t *testing.T) {
 			test.That(t, err, test.ShouldBeNil)
 
 			options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-			err = r.StartWeb(ctx, options)
-			test.That(t, err, test.ShouldBeNil)
+			wg := web.ServeInBackground(ctx, r, options, logger)
+			defer func() {
+				test.That(t, r.StopWeb(), test.ShouldBeNil)
+				wg.Wait()
+			}()
 
 			roboClient, err := client.New(ctx, addr, logger)
 			test.That(t, err, test.ShouldBeNil)
@@ -420,8 +424,11 @@ func TestSessionsWithRemote(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, remoteAddr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = remoteRobot.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, remoteRobot, options, logger)
+	defer func() {
+		test.That(t, remoteRobot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	roboConfig := fmt.Sprintf(`{
 		"remotes": [
@@ -452,8 +459,11 @@ func TestSessionsWithRemote(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 
 	roboClient, err := client.New(ctx, addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -627,8 +637,11 @@ func TestSessionsWithRemote(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, addr = robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 = web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 
 	roboClient, err = client.New(ctx, addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -742,8 +755,11 @@ func TestSessionsMixedClients(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	roboClient1, err := client.New(ctx, addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -828,8 +844,11 @@ func TestSessionsMixedOwnersNoAuth(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// with no auth turned on, we will have no session owner, meaning mixing sessions technically works, for now
 	roboClient1, err := client.New(ctx, addr, logger, client.WithDialOptions(rpc.WithWebRTCOptions(rpc.DialWebRTCOptions{
@@ -925,8 +944,11 @@ func TestSessionsMixedOwnersImplicitAuth(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// TODO(RSDK-890): using WebRTC (the default) gives us an implicit auth subject, for now
 	roboClient1, err := client.New(ctx, addr, logger)

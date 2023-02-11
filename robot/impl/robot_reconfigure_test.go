@@ -33,6 +33,7 @@ import (
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/robot/web"
 	"go.viam.com/rdk/services/datamanager"
 	_ "go.viam.com/rdk/services/datamanager/builtin"
 	"go.viam.com/rdk/services/motion"
@@ -2471,8 +2472,11 @@ func TestRemoteRobotsGold(t *testing.T) {
 	}()
 
 	options, _, addr1 := robottestutils.CreateBaseOptionsAndListener(t)
-	err = remote1.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, remote1, options, loggerR)
+	defer func() {
+		test.That(t, remote1.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	remote2, err := New(ctx, cfg, loggerR)
 	test.That(t, err, test.ShouldBeNil)
@@ -2542,9 +2546,11 @@ func TestRemoteRobotsGold(t *testing.T) {
 			datamanager.Named("foo:builtin"),
 		),
 	)
-	err = remote2.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
-
+	wg2 := web.ServeInBackground(ctx, remote2, options, loggerR)
+	defer func() {
+		test.That(t, remote2.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 	rr, ok := r.(*localRobot)
 	test.That(t, ok, test.ShouldBeTrue)
 
@@ -2623,8 +2629,11 @@ func TestRemoteRobotsGold(t *testing.T) {
 	listener2, err = net.Listen("tcp", listener2.Addr().String())
 	test.That(t, err, test.ShouldBeNil)
 	options.Network.Listener = listener2
-	err = remote3.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg3 := web.ServeInBackground(ctx, remote3, options, loggerR)
+	defer func() {
+		test.That(t, remote3.StopWeb(), test.ShouldBeNil)
+		wg3.Wait()
+	}()
 
 	utils.SelectContextOrWait(ctx, 26*time.Second)
 

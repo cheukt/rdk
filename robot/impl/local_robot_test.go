@@ -18,6 +18,7 @@ import (
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
+
 	// registers all components.
 	commonpb "go.viam.com/api/common/v1"
 	armpb "go.viam.com/api/component/arm/v1"
@@ -52,6 +53,7 @@ import (
 	"go.viam.com/rdk/robot/packages"
 	putils "go.viam.com/rdk/robot/packages/testutils"
 	"go.viam.com/rdk/robot/server"
+	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
 	"go.viam.com/rdk/services/datamanager"
 	"go.viam.com/rdk/services/datamanager/builtin"
@@ -115,8 +117,11 @@ func TestConfigRemote(t *testing.T) {
 	}()
 
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	o1 := &spatialmath.R4AA{math.Pi / 2., 0, 0, 1}
 	o1Cfg, err := spatialmath.NewOrientationConfig(o1)
@@ -352,8 +357,11 @@ func TestConfigRemoteWithAuth(t *testing.T) {
 				options.BakedAuthEntity = "blah"
 				options.BakedAuthCreds = rpc.Credentials{Type: "blah"}
 			}
-			err = r.StartWeb(ctx, options)
-			test.That(t, err, test.ShouldBeNil)
+			wg := web.ServeInBackground(ctx, r, options, logger)
+			defer func() {
+				test.That(t, r.StopWeb(), test.ShouldBeNil)
+				wg.Wait()
+			}()
 
 			entityName := tc.EntityName
 			if entityName == "" {
@@ -580,8 +588,11 @@ func TestConfigRemoteWithTLSAuth(t *testing.T) {
 	options.BakedAuthEntity = "blah"
 	options.BakedAuthCreds = rpc.Credentials{Type: "blah"}
 
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	remoteTLSConfig := options.Network.TLSConfig.Clone()
 	remoteTLSConfig.Certificates = nil
@@ -819,8 +830,11 @@ func TestStopAll(t *testing.T) {
 
 	// Test OPID cancellation
 	options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	conn, err := rgrpc.Dial(ctx, addr, logger)
 	test.That(t, err, test.ShouldBeNil)
@@ -1329,8 +1343,11 @@ func TestGetRemoteResourceAndGrandFather(t *testing.T) {
 		test.That(t, r0.Close(context.Background()), test.ShouldBeNil)
 	}()
 
-	err = r0.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r0, options, logger)
+	defer func() {
+		test.That(t, r0.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	r0arm1, err := r0.ResourceByName(arm.Named("arm1"))
 	test.That(t, err, test.ShouldBeNil)
@@ -1363,8 +1380,11 @@ func TestGetRemoteResourceAndGrandFather(t *testing.T) {
 	defer func() {
 		test.That(t, r1.Close(context.Background()), test.ShouldBeNil)
 	}()
-	err = r1.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 := web.ServeInBackground(ctx, r1, options, logger)
+	defer func() {
+		test.That(t, r1.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 
 	r, err := robotimpl.New(ctx, remoteConfig, logger)
 	defer func() {
@@ -1523,8 +1543,11 @@ func TestConfigStartsInvalidReconfiguresValid(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, r, test.ShouldNotBeNil)
 	options1, _, addr1 := robottestutils.CreateBaseOptionsAndListener(t)
-	err = r.StartWeb(context.Background(), options1)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options1, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	goodConfig := &config.Config{
 		Components: []config.Component{
@@ -1610,8 +1633,11 @@ func TestConfigStartsValidReconfiguresInvalid(t *testing.T) {
 		test.That(t, utils.TryClose(context.Background(), robotRemote), test.ShouldBeNil)
 	}()
 	options1, _, addr1 := robottestutils.CreateBaseOptionsAndListener(t)
-	err = robotRemote.StartWeb(context.Background(), options1)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, robotRemote, options1, logger)
+	defer func() {
+		test.That(t, robotRemote.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	goodConfig := &config.Config{
 		Components: []config.Component{
@@ -1888,8 +1914,11 @@ func TestReconnectRemote(t *testing.T) {
 	defer func() {
 		test.That(t, utils.TryClose(context.Background(), robot), test.ShouldBeNil)
 	}()
-	err = robot.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, robot, options, logger)
+	defer func() {
+		test.That(t, robot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// start the second robot
 	ctx1 := context.Background()
@@ -1912,8 +1941,11 @@ func TestReconnectRemote(t *testing.T) {
 		test.That(t, utils.TryClose(context.Background(), robot1), test.ShouldBeNil)
 	}()
 
-	err = robot1.StartWeb(ctx1, options1)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 := web.ServeInBackground(ctx1, robot1, options1, logger)
+	defer func() {
+		test.That(t, robot1.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 
 	robotClient := robottestutils.NewRobotClient(t, logger, addr1, time.Second)
 	defer func() {
@@ -1957,8 +1989,11 @@ func TestReconnectRemote(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	options.Network.Listener = listener
-	err = robot.StartWeb(ctx2, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg = web.ServeInBackground(ctx2, robot, options, logger)
+	defer func() {
+		test.That(t, robot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// check if the original arm can still be called
 	test.That(t, <-remoteRobotClient.Changed(), test.ShouldBeTrue)
@@ -2003,8 +2038,11 @@ func TestReconnectRemoteChangeConfig(t *testing.T) {
 	defer func() {
 		test.That(t, utils.TryClose(context.Background(), robot), test.ShouldBeNil)
 	}()
-	err = robot.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, robot, options, logger)
+	defer func() {
+		test.That(t, robot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// start the second robot
 	ctx1 := context.Background()
@@ -2026,8 +2064,11 @@ func TestReconnectRemoteChangeConfig(t *testing.T) {
 		test.That(t, utils.TryClose(context.Background(), robot1), test.ShouldBeNil)
 	}()
 
-	err = robot1.StartWeb(ctx1, options1)
-	test.That(t, err, test.ShouldBeNil)
+	wg2 := web.ServeInBackground(ctx1, robot1, options1, logger)
+	defer func() {
+		test.That(t, robot1.StopWeb(), test.ShouldBeNil)
+		wg2.Wait()
+	}()
 
 	robotClient := robottestutils.NewRobotClient(t, logger, addr1, time.Second)
 	defer func() {
@@ -2085,8 +2126,11 @@ func TestReconnectRemoteChangeConfig(t *testing.T) {
 	robot, err = robotimpl.New(ctx, &cfg, logger)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, robot, test.ShouldNotBeNil)
-	err = robot.StartWeb(ctx2, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg = web.ServeInBackground(ctx2, robot, options, logger)
+	defer func() {
+		test.That(t, robot.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	// check if the original arm can't be called anymore
 	test.That(t, <-remoteRobotClient.Changed(), test.ShouldBeTrue)
@@ -2194,8 +2238,11 @@ func TestCheckMaxInstanceSkipRemote(t *testing.T) {
 		test.That(t, r0.Close(context.Background()), test.ShouldBeNil)
 	}()
 
-	err = r0.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r0, options, logger)
+	defer func() {
+		test.That(t, r0.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	remoteConfig := &config.Config{
 		Services: []config.Service{

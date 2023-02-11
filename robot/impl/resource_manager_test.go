@@ -54,6 +54,7 @@ import (
 	"go.viam.com/rdk/robot"
 	framesystemparts "go.viam.com/rdk/robot/framesystem/parts"
 	"go.viam.com/rdk/robot/packages"
+	"go.viam.com/rdk/robot/web"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/services/shell"
 	"go.viam.com/rdk/services/vision"
@@ -1375,8 +1376,11 @@ func TestConfigRemoteAllowInsecureCreds(t *testing.T) {
 	options.BakedAuthEntity = "blah"
 	options.BakedAuthCreds = rpc.Credentials{Type: "blah"}
 
-	err = r.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r, options, logger)
+	defer func() {
+		test.That(t, r.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	remoteTLSConfig := options.Network.TLSConfig.Clone()
 	remoteTLSConfig.Certificates = nil

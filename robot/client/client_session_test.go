@@ -122,8 +122,8 @@ func TestClientSessionOptions(t *testing.T) {
 						svc := web.New(ctx, injectRobot, logger)
 
 						options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-						err := svc.Start(ctx, options)
-						test.That(t, err, test.ShouldBeNil)
+						wg := robottestutils.ServeWebInBackground(t, ctx, svc, options)
+						defer wg.Wait()
 
 						var opts []client.RobotClientOption
 						if sessionsDisabledCopy {
@@ -308,8 +308,8 @@ func TestClientSessionExpiration(t *testing.T) {
 				svc := web.New(ctx, injectRobot, logger)
 
 				options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-				err := svc.Start(ctx, options)
-				test.That(t, err, test.ShouldBeNil)
+				wg := robottestutils.ServeWebInBackground(t, ctx, svc, options)
+				defer wg.Wait()
 
 				var opts []client.RobotClientOption
 				if webrtcDisabledCopy {
@@ -498,8 +498,8 @@ func TestClientSessionResume(t *testing.T) {
 				svc := web.New(ctx, injectRobot, logger)
 
 				options, _, addr := robottestutils.CreateBaseOptionsAndListener(t)
-				err := svc.Start(ctx, options)
-				test.That(t, err, test.ShouldBeNil)
+				wg := robottestutils.ServeWebInBackground(t, ctx, svc, options)
+				defer wg.Wait()
 
 				var opts []client.RobotClientOption
 				if webrtcDisabledCopy {

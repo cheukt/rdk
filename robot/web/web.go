@@ -313,7 +313,8 @@ func ServeInBackground(ctx context.Context, r robot.LocalRobot, o weboptions.Opt
 	activeBackgroundWorkers.Add(1)
 	utils.PanicCapturingGo(func() {
 		defer activeBackgroundWorkers.Done()
-		ServeWeb(ctx, r, o, logger)
+		err := ServeWeb(ctx, r, o, logger)
+		logger.Errorw("error serving web", "error", err)
 	})
 	return &activeBackgroundWorkers
 }
