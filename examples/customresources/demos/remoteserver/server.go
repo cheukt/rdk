@@ -46,5 +46,5 @@ func mainWithArgs(ctx context.Context, args []string, logger golog.Logger) (err 
 	}
 	defer myRobot.Close(ctx)
 
-	return web.RunWebWithConfig(ctx, myRobot, cfg, logger)
+	return web.ServeWithConfig(ctx, myRobot, cfg, logger)
 }

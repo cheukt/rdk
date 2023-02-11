@@ -234,13 +234,13 @@ func (r *localRobot) Logger() golog.Logger {
 	return r.logger
 }
 
-// StartWeb starts the web server, will return an error if server is already up.
-func (r *localRobot) StartWeb(ctx context.Context, o weboptions.Options) (err error) {
+// ServeWeb serve the web server, will return an error if server is already up.
+func (r *localRobot) ServeWeb(ctx context.Context, o weboptions.Options) error {
 	webSvc, err := r.webService()
 	if err != nil {
 		return err
 	}
-	return webSvc.Start(ctx, o)
+	return webSvc.Serve(ctx, o)
 }
 
 // StopWeb stops the web server, will be a noop if server is not up.

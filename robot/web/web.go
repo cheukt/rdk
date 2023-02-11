@@ -309,13 +309,13 @@ func ServeWeb(ctx context.Context, r robot.LocalRobot, o weboptions.Options, log
 // ServeInBackground serves the web server on the robot in the background. It returns a wait group that can be waited on
 // to make sure it is cleaned up.
 func ServeInBackground(ctx context.Context, r robot.LocalRobot, o weboptions.Options, logger golog.Logger) *sync.WaitGroup {
-	var activeBackgroundWorkers *sync.WaitGroup
+	var activeBackgroundWorkers sync.WaitGroup
 	activeBackgroundWorkers.Add(1)
 	utils.PanicCapturingGo(func() {
 		defer activeBackgroundWorkers.Done()
 		ServeWeb(ctx, r, o, logger)
 	})
-	return activeBackgroundWorkers
+	return &activeBackgroundWorkers
 }
 
 // ServeWithConfig starts the web server on the robot with a robot config and blocks until we cancel the context.

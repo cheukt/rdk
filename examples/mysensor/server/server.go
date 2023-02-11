@@ -72,5 +72,5 @@ func mainWithArgs(ctx context.Context, args []string, logger golog.Logger) (err 
 	o.Network.BindAddress = "localhost:8081"
 
 	// runs the web server on the robot and blocks until the program is stopped.
-	return web.RunWeb(ctx, myRobot, o, logger)
+	return web.ServeWeb(ctx, myRobot, o, logger)
 }

@@ -16,6 +16,7 @@ import (
 	"go.viam.com/rdk/examples/customresources/apis/gizmoapi"
 	_ "go.viam.com/rdk/examples/customresources/models/mygizmo"
 	robotimpl "go.viam.com/rdk/robot/impl"
+	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
 	"go.viam.com/rdk/utils"
 )
@@ -41,8 +42,11 @@ func TestGizmo(t *testing.T) {
 	}()
 	options := weboptions.New()
 	options.Network.BindAddress = addr1
-	err = r0.StartWeb(ctx, options)
-	test.That(t, err, test.ShouldBeNil)
+	wg := web.ServeInBackground(ctx, r0, options, logger)
+	defer func() {
+		test.That(t, r0.StopWeb(), test.ShouldBeNil)
+		wg.Wait()
+	}()
 
 	tmpConf, err := os.CreateTemp("", "*.json")
 	test.That(t, err, test.ShouldBeNil)

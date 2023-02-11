@@ -117,8 +117,8 @@ type LocalRobot interface {
 	// on the given new config.
 	Reconfigure(ctx context.Context, newConfig *config.Config)
 
-	// StartWeb starts the web server, will return an error if server is already up.
-	StartWeb(ctx context.Context, o weboptions.Options) error
+	// ServeWeb starts the web server, will return an error if server is already up.
+	ServeWeb(ctx context.Context, o weboptions.Options) error
 
 	// StopWeb stops the web server, will be a noop if server is not up.
 	StopWeb() error
