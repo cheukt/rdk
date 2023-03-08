@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"runtime/pprof"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"go.viam.com/utils/rpc"
 
 	"go.viam.com/rdk/config"
+	"go.viam.com/rdk/robot"
 	robotimpl "go.viam.com/rdk/robot/impl"
 	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
@@ -294,6 +296,8 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 	}()
 	onWatchDone := make(chan struct{})
 	oldCfg := processedConfig
+
+	configChan := make(chan *config.Config)
 	utils.ManagedGo(func() {
 		for {
 			select {
@@ -317,26 +321,15 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 					s.logger.Errorw("reconfiguration aborted: error diffing config", "error", err)
 					continue
 				}
-				var options weboptions.Options
 
 				if !diff.NetworkEqual || !diff.MediaEqual {
-					if err := myRobot.StopWeb(); err != nil {
-						s.logger.Errorw("reconfiguration failed: error stopping web service while reconfiguring", "error", err)
-						continue
-					}
-					options, err = s.createWebOptions(processedConfig)
-					if err != nil {
-						s.logger.Errorw("reconfiguration aborted: error creating weboptions", "error", err)
-						continue
-					}
+					configChan <- nil
 				}
 
 				myRobot.Reconfigure(ctx, processedConfig)
 
 				if !diff.NetworkEqual || !diff.MediaEqual {
-					if err := myRobot.StartWeb(ctx, options); err != nil {
-						s.logger.Errorw("reconfiguration failed: error starting web service while reconfiguring", "error", err)
-					}
+					configChan <- processedConfig
 				}
 				oldCfg = processedConfig
 			}
@@ -349,9 +342,58 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 	}()
 	defer cancel()
 
-	options, err := s.createWebOptions(processedConfig)
-	if err != nil {
-		return err
+	return s.serveWithReconfigure(ctx, myRobot, configChan)
+}
+
+// serveWithReconfigure will serve the web server - it will block unless an error occurs
+func (s *robotServer) serveWithReconfigure(ctx context.Context, r robot.LocalRobot, configChan chan *config.Config) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case cfg := <-configChan:
+			if cfg == nil {
+				if err := r.StopWeb(); err != nil {
+					s.logger.Errorw("reconfiguration failed: error stopping web service while reconfiguring", "error", err)
+					return err
+				}
+				continue
+			}
+			// if there is a config, spin up a separate routine that will cancel context on error
+			// create options and start server
+			o, err := s.createWebOptions(cfg)
+			if err != nil {
+				s.logger.Errorw("reconfiguration aborted: error creating weboptions", "error", err)
+				return err
+			}
+
+			// this function should log and then cancel the larger context on error
+			// otherwise
+			go func() {
+				defer func() {
+					if err := recover(); err != nil {
+						debug.PrintStack()
+						golog.Global().Errorw("panic while running function", "error", err)
+						if callback == nil {
+							return
+						}
+						golog.Global().Infow("waiting a bit to call callback", "wait", waitDur.String())
+						time.Sleep(waitDur)
+						callback(err)
+					}
+				}()
+				if err = r.ServeWeb(ctx, o); err != nil {
+					s.logger.Errorw("error serving web", "error", err)
+					return err
+				}
+				return nil
+			}()
+			return nil
+		}
 	}
-	return web.RunWeb(ctx, myRobot, options, s.logger)
 }
