@@ -1,25 +1,23 @@
 <script setup lang="ts">
 
 import { grpc } from '@improbable-eng/grpc-web';
-import { Client, sensorsApi, commonApi } from '@viamrobotics/sdk';
+import { Client, sensorsApi, commonApi, ServiceError } from '@viamrobotics/sdk';
 import { toast } from '../lib/toast';
 import { resourceNameToString } from '../lib/resource';
 import { rcLogConditionally } from '../lib/log';
 
-interface SensorName {
+export interface SensorName {
   name: string
   namespace: string
   type: string
   subtype: string
 }
 
-interface Props {
+const props = defineProps<{
   name: string
   sensorNames: SensorName[]
   client: Client
-}
-
-const props = defineProps<Props>();
+}>();
 
 interface Reading {
   _type: string
@@ -43,22 +41,25 @@ const getReadings = (inputNames: SensorName[]) => {
   req.setSensorNamesList(names);
 
   rcLogConditionally(req);
-  props.client.sensorsService.getReadings(req, new grpc.Metadata(), (error, response) => {
-    if (error) {
-      return toast.error(error.message);
-    }
-
-    for (const item of response!.getReadingsList()) {
-      const readings = item.getReadingsMap();
-      const rr: Record<string, Reading> = {};
-
-      for (const [key, value] of readings.entries()) {
-        rr[key] = value.toJavaScript() as Reading;
+  props.client.sensorsService.getReadings(
+    req, new grpc.Metadata(), (error: ServiceError, response: sensorsApi.GetReadingsResponse) => {
+      if (error) {
+        toast.error(error.message);
+        return;
       }
 
-      sensorReadings[resourceNameToString(item.getName()!.toObject())] = rr;
+      for (const item of response!.getReadingsList()) {
+        const readings = item.getReadingsMap();
+        const rr: Record<string, Reading> = {};
+
+        for (const [key, value] of readings.entries()) {
+          rr[key] = value.toJavaScript() as Reading;
+        }
+
+        sensorReadings[resourceNameToString(item.getName()!.toObject())] = rr;
+      }
     }
-  });
+  );
 };
 
 const getData = (sensorName: SensorName) => {

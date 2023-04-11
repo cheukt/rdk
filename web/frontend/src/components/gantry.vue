@@ -5,7 +5,7 @@ import { Client, gantryApi } from '@viamrobotics/sdk';
 import { displayError } from '../lib/error';
 import { rcLogConditionally } from '../lib/log';
 
-interface Props {
+const props = defineProps<{
   name: string
   status: {
     parts: {
@@ -15,9 +15,7 @@ interface Props {
     }[]
   }
   client: Client
-}
-
-const props = defineProps<Props>();
+}>();
 
 const increment = (axis: number, amount: number) => {
   const pos: number[] = [];
@@ -90,7 +88,7 @@ const stop = () => {
             <th class="border border-black p-2">
               {{ pp.axis }}
             </th>
-            <td class="flex p-2 gap-2">
+            <td class="flex gap-2 p-2">
               <v-button
                 class="flex-nowrap"
                 label="--"

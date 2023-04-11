@@ -180,10 +180,13 @@ func (sf *tailGeometryStaticFrame) Geometries(input []Input) (*GeometriesInFrame
 	if len(input) != 0 {
 		return nil, NewIncorrectInputLengthError(len(input), 0)
 	}
-	m := make(map[string]spatial.Geometry)
+	newGeom := sf.geometry.Transform(sf.transform)
+	if newGeom.Label() == "" {
+		newGeom.SetLabel(sf.name)
+	}
+
 	// Create the new geometry at a pose of `transform` from the frame
-	m[sf.Name()] = sf.geometry.Transform(sf.transform)
-	return NewGeometriesInFrame(sf.name, m), nil
+	return NewGeometriesInFrame(sf.name, []spatial.Geometry{newGeom}), nil
 }
 
 // noGeometryFrame is a frame wrapper which will always return nil for its geometry. Use this to remove the geometries from any frame.
@@ -267,9 +270,11 @@ func (sf *staticFrame) Geometries(input []Input) (*GeometriesInFrame, error) {
 	if len(input) != 0 {
 		return nil, NewIncorrectInputLengthError(len(input), 0)
 	}
-	m := make(map[string]spatial.Geometry)
-	m[sf.Name()] = sf.geometry.Transform(spatial.NewZeroPose())
-	return NewGeometriesInFrame(sf.name, m), nil
+	newGeom := sf.geometry.Transform(spatial.NewZeroPose())
+	if newGeom.Label() == "" {
+		newGeom.SetLabel(sf.name)
+	}
+	return NewGeometriesInFrame(sf.name, []spatial.Geometry{newGeom}), nil
 }
 
 func (sf *staticFrame) MarshalJSON() ([]byte, error) {
@@ -354,15 +359,13 @@ func (pf *translationalFrame) ProtobufFromInput(input []Input) *pb.JointPosition
 // Geometries returns an object representing the 3D space associeted with the translationalFrame.
 func (pf *translationalFrame) Geometries(input []Input) (*GeometriesInFrame, error) {
 	if pf.geometry == nil {
-		return nil, fmt.Errorf("frame of type %T has nil geometry", pf)
+		return NewGeometriesInFrame(pf.Name(), nil), nil
 	}
 	pose, err := pf.Transform(input)
 	if pose == nil || (err != nil && !strings.Contains(err.Error(), OOBErrString)) {
 		return nil, err
 	}
-	m := make(map[string]spatial.Geometry)
-	m[pf.Name()] = pf.geometry.Transform(pose)
-	return NewGeometriesInFrame(pf.name, m), err
+	return NewGeometriesInFrame(pf.name, []spatial.Geometry{pf.geometry.Transform(pose)}), err
 }
 
 func (pf *translationalFrame) MarshalJSON() ([]byte, error) {
@@ -473,9 +476,7 @@ type mobile2DFrame struct {
 	geometry spatial.Geometry
 }
 
-// NewMobile2DFrame instantiates a frame that can translate in the x and y dimensions and will always remain on the plane Z=0
-// This frame will have a name, limits (representing the bounds the frame is allowed to translate within) and a geometry
-// defined by the arguments passed into this function.
+// NewMobile2DFrame instantiates a frame that can translate in the x and y dimensions and will always remain on the plane Z=0.
 func NewMobile2DFrame(name string, limits []Limit, geometry spatial.Geometry) (Frame, error) {
 	if len(limits) != 2 {
 		return nil, fmt.Errorf("cannot create a %d dof mobile frame, only support 2 dimensions currently", len(limits))
@@ -512,15 +513,13 @@ func (mf *mobile2DFrame) ProtobufFromInput(input []Input) *pb.JointPositions {
 
 func (mf *mobile2DFrame) Geometries(input []Input) (*GeometriesInFrame, error) {
 	if mf.geometry == nil {
-		return nil, fmt.Errorf("frame of type %T has nil geometry", mf)
+		return NewGeometriesInFrame(mf.Name(), nil), nil
 	}
 	pose, err := mf.Transform(input)
 	if pose == nil || (err != nil && !strings.Contains(err.Error(), OOBErrString)) {
 		return nil, err
 	}
-	m := make(map[string]spatial.Geometry)
-	m[mf.Name()] = mf.geometry.Transform(pose)
-	return NewGeometriesInFrame(mf.name, m), err
+	return NewGeometriesInFrame(mf.name, []spatial.Geometry{mf.geometry.Transform(pose)}), err
 }
 
 func (mf *mobile2DFrame) MarshalJSON() ([]byte, error) {

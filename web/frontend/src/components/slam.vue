@@ -1,21 +1,21 @@
 
 <script setup lang="ts">
 
-import { nextTick } from 'vue';
+import { $ref, $computed } from 'vue/macros';
 import { grpc } from '@improbable-eng/grpc-web';
-import { Client, commonApi, slamApi } from '@viamrobotics/sdk';
-import { displayError } from '../lib/error';
+import { Client, commonApi, ResponseStream, ServiceError, slamApi } from '@viamrobotics/sdk';
+import { displayError, isServiceError } from '../lib/error';
 import { rcLogConditionally } from '../lib/log';
 import PCD from './pcd/pcd-view.vue';
 import Slam2dRender from './slam-2d-render.vue';
 
-interface Props {
+type MapAndPose = { map: Uint8Array, pose: commonApi.Pose}
+
+const props = defineProps<{
   name: string
   resources: commonApi.ResourceName.AsObject[]
   client: Client
-}
-
-const props = defineProps<Props>();
+}>();
 
 const selected2dValue = $ref('manual');
 const selected3dValue = $ref('manual');
@@ -24,89 +24,175 @@ let pointcloud = $ref<Uint8Array | undefined>();
 let pose = $ref<commonApi.Pose | undefined>();
 let show2d = $ref(false);
 let show3d = $ref(false);
+let refresh2DCancelled = true;
+let refresh3DCancelled = true;
 
 const loaded2d = $computed(() => (pointcloud !== undefined && pose !== undefined));
 
-let slam2dIntervalId = -1;
-let slam3dIntervalId = -1;
+let slam2dTimeoutId = -1;
+let slam3dTimeoutId = -1;
 
-const fetchSLAMMap = (name: string) => {
-  return nextTick(() => {
-    const req = new slamApi.GetMapRequest();
+const concatArrayU8 = (arrays: Uint8Array[]) => {
+  const totalLength = arrays.reduce((acc, value) => acc + value.length, 0);
+  const result = new Uint8Array(totalLength);
+  let length = 0;
+  for (const array of arrays) {
+    result.set(array, length);
+    length += array.length;
+  }
+  return result;
+};
+
+const fetchSLAMMap = (name: string): Promise<Uint8Array> => {
+  return new Promise((resolve, reject) => {
+    const req = new slamApi.GetPointCloudMapRequest();
     req.setName(name);
-    req.setMimeType('pointcloud/pcd');
-
     rcLogConditionally(req);
-    props.client.slamService.getMap(req, new grpc.Metadata(), (error, response) => {
-      if (error) {
-        return displayError(error);
+    const chunks: Uint8Array[] = [];
+
+    const getPointCloudMap: ResponseStream<slamApi.GetPointCloudMapResponse> =
+      props.client.slamService.getPointCloudMap(req);
+    getPointCloudMap.on('data', (res: { getPointCloudPcdChunk_asU8(): Uint8Array }) => {
+      const chunk = res.getPointCloudPcdChunk_asU8();
+      chunks.push(chunk);
+    });
+    getPointCloudMap.on('status', (status: { code: number, details: string, metadata: string }) => {
+      if (status.code !== 0) {
+        const error = {
+          message: status.details,
+          code: status.code,
+          metadata: status.metadata,
+        };
+        reject(error);
       }
-
-      /*
-       * TODO: This is a hack workaround the fac that at time of writing response!.getPointCloud()!.getPointCloud_asU8()
-       * appears to return the binary data of the entire response, not response.pointcloud.pointcloud.
-       * Tracked in ticket: https://viam.atlassian.net/browse/RSDK-2108
-       */
-
-      const base64DecodedPointCloudString = atob(response!.toObject().pointCloud!.pointCloud! as string);
-      pointcloud = Uint8Array.from(base64DecodedPointCloudString, (char: string): number => char.codePointAt(0)!);
-      // END NOTE
-      pointCloudUpdateCount += 1;
+    });
+    getPointCloudMap.on('end', (end: { code: number }) => {
+      if (end === undefined || end.code !== 0) {
+        // the error will be logged in the 'status' callback
+        return;
+      }
+      const arr = concatArrayU8(chunks);
+      resolve(arr);
     });
   });
 };
 
-const fetchSLAMPose = (name: string) => {
-  return nextTick(() => {
+const fetchSLAMPose = (name: string): Promise<commonApi.Pose> => {
+  return new Promise((resolve, reject): void => {
     const req = new slamApi.GetPositionRequest();
     req.setName(name);
-    props.client.slamService.getPosition(req, new grpc.Metadata(), (error, res): void => {
-      if (error) {
-        displayError(error);
-        return;
+    props.client.slamService.getPosition(
+      req,
+      new grpc.Metadata(),
+      (error: ServiceError, res: slamApi.GetPositionResponse): void => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(res!.getPose()!);
       }
-      pose = res!.getPose()!.getPose()!;
-    });
+    );
   });
 };
 
 const refresh2d = async (name: string) => {
-  const mapPromise = fetchSLAMMap(name);
-  const posePromise = fetchSLAMPose(name);
-  await mapPromise;
-  await posePromise;
+  const map = await fetchSLAMMap(name);
+  const returnedPose = await fetchSLAMPose(name);
+  const mapAndPose: MapAndPose = {
+    map,
+    pose: returnedPose,
+  };
+  return mapAndPose;
 };
 
-// eslint-disable-next-line require-await
-const updateSLAM2dRefreshFrequency = async (name: string, time: 'manual' | 'off' | string) => {
-  window.clearInterval(slam2dIntervalId);
+const handleRefresh2dResponse = (response: MapAndPose): void => {
+  pointcloud = response.map;
+  pose = response.pose;
+  pointCloudUpdateCount += 1;
+};
 
-  if (time === 'manual') {
-    refresh2d(name);
+const handleRefresh3dResponse = (response: Uint8Array): void => {
+  pointcloud = response;
+  pointCloudUpdateCount += 1;
+};
 
-  } else if (time === 'off') {
-    // do nothing
+const handleError = (errorLocation: string, error: unknown): void => {
+  if (isServiceError(error)) {
+    displayError(error as ServiceError);
   } else {
-
-    refresh2d(name);
-    slam2dIntervalId = window.setInterval(() => {
-      refresh2d(name);
-    }, Number.parseFloat(time) * 1000);
+    displayError(`${errorLocation} hit error: ${error}`);
   }
 };
 
-const updateSLAM3dRefreshFrequency = (name: string, time: 'manual' | 'off' | string) => {
-  clearInterval(slam3dIntervalId);
+const scheduleRefresh2d = (name: string, time: string) => {
+  const timeoutCallback = async () => {
+    try {
+      const res = await refresh2d(name);
+      handleRefresh2dResponse(res);
+    } catch (error) {
+      handleError('refresh2d', error);
+      return;
+    }
+    if (refresh2DCancelled) {
+      return;
+    }
+    scheduleRefresh2d(name, time);
+  };
+  slam2dTimeoutId = window.setTimeout(timeoutCallback, Number.parseFloat(time) * 1000);
+};
+
+const scheduleRefresh3d = (name: string, time: string) => {
+  const timeoutCallback = async () => {
+    try {
+      const res = await fetchSLAMMap(name);
+      handleRefresh3dResponse(res);
+    } catch (error) {
+      handleError('fetchSLAMMap', error);
+      return;
+    }
+    if (refresh3DCancelled) {
+      return;
+    }
+    scheduleRefresh3d(name, time);
+  };
+  slam3dTimeoutId = window.setTimeout(timeoutCallback, Number.parseFloat(time) * 1000);
+};
+
+const updateSLAM2dRefreshFrequency = async (name: string, time: 'manual' | 'off' | string) => {
+  refresh2DCancelled = true;
+  window.clearTimeout(slam2dTimeoutId);
 
   if (time === 'manual') {
-    fetchSLAMMap(name);
+    try {
+      const res = await refresh2d(name);
+      handleRefresh2dResponse(res);
+    } catch (error) {
+      handleError('refresh2d', error);
+    }
   } else if (time === 'off') {
     // do nothing
   } else {
-    fetchSLAMMap(name);
-    slam3dIntervalId = window.setInterval(() => {
-      fetchSLAMMap(name);
-    }, Number.parseFloat(time) * 1000);
+    refresh2DCancelled = false;
+    scheduleRefresh2d(name, time);
+  }
+};
+
+const updateSLAM3dRefreshFrequency = async (name: string, time: 'manual' | 'off' | string) => {
+  refresh3DCancelled = true;
+  window.clearTimeout(slam3dTimeoutId);
+
+  if (time === 'manual') {
+    try {
+      const res = await fetchSLAMMap(name);
+      handleRefresh3dResponse(res);
+    } catch (error) {
+      handleError('fetchSLAMMap', error);
+    }
+  } else if (time === 'off') {
+    // do nothing
+  } else {
+    refresh3DCancelled = false;
+    scheduleRefresh3d(name, time);
   }
 };
 
@@ -128,8 +214,7 @@ const selectSLAMPCDRefreshFrequency = () => {
   updateSLAM3dRefreshFrequency(props.name, selected3dValue);
 };
 
-// eslint-disable-next-line require-await
-const refresh2dMap = async () => {
+const refresh2dMap = () => {
   updateSLAM2dRefreshFrequency(props.name, selected2dValue);
 };
 

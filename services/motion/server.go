@@ -10,6 +10,7 @@ import (
 
 	"go.viam.com/rdk/protoutils"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/subtype"
 	"go.viam.com/rdk/utils"
 )
@@ -51,9 +52,25 @@ func (server *subtypeServer) Move(ctx context.Context, req *pb.MoveRequest) (*pb
 		protoutils.ResourceNameFromProto(req.GetComponentName()),
 		referenceframe.ProtobufToPoseInFrame(req.GetDestination()),
 		worldState,
+		req.GetConstraints(),
 		req.Extra.AsMap(),
 	)
 	return &pb.MoveResponse{Success: success}, err
+}
+
+func (server *subtypeServer) MoveOnMap(ctx context.Context, req *pb.MoveOnMapRequest) (*pb.MoveOnMapResponse, error) {
+	svc, err := server.service(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	success, err := svc.MoveOnMap(
+		ctx,
+		protoutils.ResourceNameFromProto(req.GetComponentName()),
+		spatialmath.NewPoseFromProtobuf(req.GetDestination()),
+		protoutils.ResourceNameFromProto(req.GetSlamServiceName()),
+		req.Extra.AsMap(),
+	)
+	return &pb.MoveOnMapResponse{Success: success}, err
 }
 
 func (server *subtypeServer) MoveSingleComponent(

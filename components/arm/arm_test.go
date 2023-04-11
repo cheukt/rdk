@@ -40,8 +40,8 @@ func setupDependencies(t *testing.T) registry.Dependencies {
 	t.Helper()
 
 	deps := make(registry.Dependencies)
-	deps[arm.Named(testArmName)] = &mockLocal{Name: testArmName}
-	deps[arm.Named(fakeArmName)] = "not an arm"
+	deps[arm.Named(testArmName)] = &mock{Name: testArmName}
+	deps[arm.Named(fakeArmName)] = "not a arm"
 	return deps
 }
 
@@ -77,26 +77,6 @@ func TestGenericDo(t *testing.T) {
 	test.That(t, ret, test.ShouldEqual, command)
 }
 
-func TestFromDependencies(t *testing.T) {
-	deps := setupDependencies(t)
-
-	a, err := arm.FromDependencies(deps, testArmName)
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, a, test.ShouldNotBeNil)
-
-	pose1, err := a.EndPosition(context.Background(), nil)
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, pose1, test.ShouldResemble, pose)
-
-	a, err = arm.FromDependencies(deps, fakeArmName)
-	test.That(t, err, test.ShouldBeError, arm.DependencyTypeError(fakeArmName, "string"))
-	test.That(t, a, test.ShouldBeNil)
-
-	a, err = arm.FromDependencies(deps, missingArmName)
-	test.That(t, err, test.ShouldBeError, rutils.DependencyNotFoundError(missingArmName))
-	test.That(t, a, test.ShouldBeNil)
-}
-
 func TestFromRobot(t *testing.T) {
 	r := setupInjectRobot()
 
@@ -122,6 +102,22 @@ func TestNamesFromRobot(t *testing.T) {
 
 	names := arm.NamesFromRobot(r)
 	test.That(t, names, test.ShouldResemble, []string{testArmName})
+}
+
+func TestFromDependencies(t *testing.T) {
+	deps := setupDependencies(t)
+
+	res, err := arm.FromDependencies(deps, testArmName)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, res, test.ShouldNotBeNil)
+
+	res, err = arm.FromDependencies(deps, fakeArmName)
+	test.That(t, err, test.ShouldBeError, rutils.DependencyTypeError[arm.Arm](fakeArmName, "string"))
+	test.That(t, res, test.ShouldBeNil)
+
+	res, err = arm.FromDependencies(deps, missingArmName)
+	test.That(t, err, test.ShouldBeError, rutils.DependencyNotFoundError(missingArmName))
+	test.That(t, res, test.ShouldBeNil)
 }
 
 func TestStatusValid(t *testing.T) {
@@ -423,9 +419,9 @@ func TestOOBArm(t *testing.T) {
 		test.That(t, pose, test.ShouldNotBeNil)
 	})
 
-	t.Run("MoveToPosition fails when OOB", func(t *testing.T) {
+	t.Run("Move fails when OOB", func(t *testing.T) {
 		pose = spatialmath.NewPoseFromPoint(r3.Vector{200, 200, 200})
-		err := arm.Move(context.Background(), &inject.Robot{}, injectedArm, pose, &referenceframe.WorldState{})
+		err := arm.Move(context.Background(), logger, injectedArm, pose)
 		u := "cartesian movements are not allowed when arm joints are out of bounds"
 		v := "joint 0 input out of bounds, input 12.56637 needs to be within range [6.28319 -6.28319]"
 		s := strings.Join([]string{u, v}, ": ")
@@ -466,8 +462,11 @@ func TestOOBArm(t *testing.T) {
 	})
 
 	t.Run("MoveToPosition works when IB", func(t *testing.T) {
-		pose = spatialmath.NewPoseFromPoint(r3.Vector{200, 200, 200})
-		err := injectedArm.MoveToPosition(context.Background(), pose, &referenceframe.WorldState{}, nil)
+		homePose, err := injectedArm.EndPosition(context.Background(), nil)
+		test.That(t, err, test.ShouldBeNil)
+		testLinearMove := r3.Vector{homePose.Point().X + 20, homePose.Point().Y, homePose.Point().Z}
+		testPose := spatialmath.NewPoseFromPoint(testLinearMove)
+		err = injectedArm.MoveToPosition(context.Background(), testPose, nil)
 		test.That(t, err, test.ShouldBeNil)
 	})
 
@@ -528,6 +527,7 @@ func TestXArm6Locations(t *testing.T) {
 			ArmModel: "xArm6",
 		},
 	}
+
 	notReal, err := fake.NewArm(cfg, logger)
 	test.That(t, err, test.ShouldBeNil)
 
@@ -550,8 +550,8 @@ func TestXArm6Locations(t *testing.T) {
 		}
 		checkMap["rdk:component:arm:lower_forearm"] = r3.Vector{
 			131.000000000000000000000000,
-			0.000000000000000000000000,
-			274.000000000000000000000000,
+			-27.500000000000000000000000,
+			274.200000000000000000000000,
 		}
 		checkMap["rdk:component:arm:wrist_link"] = r3.Vector{
 			206.000000000000000000000000,
@@ -563,10 +563,10 @@ func TestXArm6Locations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
+	//nolint:dupl
 	t.Run("location check1", func(t *testing.T) {
 		checkMap := make(map[string]r3.Vector)
 		checkMap["rdk:component:arm:base_top"] = r3.Vector{
@@ -585,9 +585,9 @@ func TestXArm6Locations(t *testing.T) {
 			516.742582359123957758129109,
 		}
 		checkMap["rdk:component:arm:lower_forearm"] = r3.Vector{
-			155.916014884677508689492242,
-			-0.000000000000000289509481,
-			298.848170597876446663576644,
+			158.566974381217988820935716,
+			-27.362614545145717670493468,
+			299.589614460540474283334333,
 		}
 		checkMap["rdk:component:arm:wrist_link"] = r3.Vector{
 			259.050559200277916716004256,
@@ -599,10 +599,10 @@ func TestXArm6Locations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
+	//nolint:dupl
 	t.Run("location check2", func(t *testing.T) {
 		checkMap := make(map[string]r3.Vector)
 		checkMap["rdk:component:arm:base_top"] = r3.Vector{
@@ -621,9 +621,9 @@ func TestXArm6Locations(t *testing.T) {
 			530.142781900699674224597402,
 		}
 		checkMap["rdk:component:arm:lower_forearm"] = r3.Vector{
-			175.357954329185588449036004,
-			0.000000000000000363462780,
-			331.043246286488795249169925,
+			180.312201371473605604478507,
+			-26.951830890634148829576588,
+			333.355009225598280409030849,
 		}
 		checkMap["rdk:component:arm:wrist_link"] = r3.Vector{
 			297.258065257027055849903263,
@@ -635,9 +635,8 @@ func TestXArm6Locations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
 }
 
@@ -651,6 +650,7 @@ func TestUR5ELocations(t *testing.T) {
 			ArmModel: "ur5e",
 		},
 	}
+
 	notReal, err := fake.NewArm(cfg, logger)
 	test.That(t, err, test.ShouldBeNil)
 
@@ -691,9 +691,8 @@ func TestUR5ELocations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
 	//nolint:dupl
 	t.Run("location check1", func(t *testing.T) {
@@ -733,9 +732,8 @@ func TestUR5ELocations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
 	//nolint:dupl
 	t.Run("location check2", func(t *testing.T) {
@@ -775,21 +773,18 @@ func TestUR5ELocations(t *testing.T) {
 		geoms, err := notReal.ModelFrame().Geometries(in)
 		test.That(t, err, test.ShouldBeNil)
 		geomMap := geoms.Geometries()
-		b, outMap := locationCheckTestHelper(geomMap, checkMap)
+		b := locationCheckTestHelper(geomMap, checkMap)
 		test.That(t, b, test.ShouldBeTrue)
-		test.That(t, outMap, test.ShouldBeEmpty)
 	})
 }
 
-//nolint:lll
-func locationCheckTestHelper(geomMap map[string]spatialmath.Geometry, checkMap map[string]r3.Vector) (bool, map[string]spatialmath.Geometry) {
-	for s, g := range geomMap {
-		vecCheck := checkMap[s]
+func locationCheckTestHelper(geomList []spatialmath.Geometry, checkMap map[string]r3.Vector) bool {
+	for _, g := range geomList {
+		vecCheck := checkMap[g.Label()]
 		vecActual := g.Pose().Point()
 		if !spatialmath.R3VectorAlmostEqual(vecCheck, vecActual, 1e-2) {
-			return false, geomMap
+			return false
 		}
-		delete(geomMap, s)
 	}
-	return true, geomMap
+	return true
 }

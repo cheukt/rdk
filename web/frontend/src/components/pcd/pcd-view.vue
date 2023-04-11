@@ -1,6 +1,6 @@
 <!-- eslint-disable multiline-comment-style -->
 <script setup lang="ts">
-// @ts-nocheck TODO: fix typecheck errors in https://viam.atlassian.net/browse/RSDK-1897
+
 /**
  * @TODO: No disposing of THREE resources currently.
  * This is causing memory leaks.
@@ -14,17 +14,15 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls';
 import { filterResources } from '../../lib/resource';
 import { toast } from '../../lib/toast';
-import { Client, commonApi, motionApi } from '@viamrobotics/sdk';
+import { Client, commonApi, motionApi, ServiceError } from '@viamrobotics/sdk';
 import InfoButton from '../info-button.vue';
 
-interface Props {
+const props = defineProps<{
   resources: commonApi.ResourceName.AsObject[]
   pointcloud?: Uint8Array
   cameraName?: string
   client: Client
-}
-
-const props = defineProps<Props>();
+}>();
 
 const container = $ref<HTMLDivElement>();
 
@@ -261,13 +259,14 @@ const update = (cloud: Uint8Array) => {
     (mesh.material as THREE.MeshBasicMaterial).dispose();
   }
 
-  const points = loader.parse(cloud.buffer, '');
+  const points = loader.parse(cloud.buffer);
   points.name = 'points';
-  const positions = points.geometry.attributes.position!.array;
+  const positions = (points.geometry.attributes.position as THREE.BufferAttribute).array as Float32Array;
 
   // TODO (hackday): colors is not consistently returned, if not just render all points as blue
   // eslint-disable-next-line unicorn/prefer-spread
-  const colors = points.geometry.attributes.color?.array ?? Array.from(positions).flatMap(() => [0.3, 0.5, 0.7]);
+  const colorAttrib = points.geometry.attributes.color as THREE.BufferAttribute | undefined;
+  const colors = colorAttrib?.array ?? [...positions].flatMap(() => [0.3, 0.5, 0.7]);
 
   const count = positions.length / 3;
   const material = new THREE.MeshBasicMaterial();
@@ -326,7 +325,8 @@ const loadBoundingBox = (index: number) => {
   const segment = objects[index];
 
   if (!segment) {
-    return toast.error('Segment cannot be found.');
+    toast.error('Segment cannot be found.');
+    return;
   }
 
   const center = segment.getGeometries()!.getGeometriesList()[0]!.getCenter()!;
@@ -345,7 +345,8 @@ const loadPoint = (index: number) => {
   const segment = objects[index];
 
   if (!segment) {
-    return toast.error('Segment cannot be found.');
+    toast.error('Segment cannot be found.');
+    return;
   }
 
   const center = segment.getGeometries()!.getGeometriesList()[0]!.getCenter()!;
@@ -402,7 +403,8 @@ const handleCanvasMouseUp = (event: MouseEvent) => {
   const points = scene.getObjectByName('points') as THREE.InstancedMesh;
 
   if (intersect?.instanceId === undefined) {
-    return toast.info('No point intersected.');
+    toast.info('No point intersected.');
+    return;
   }
 
   points.getMatrixAt(intersect.instanceId, matrix);
@@ -414,7 +416,8 @@ const handleMove = () => {
   const [gripper] = filterResources(props.resources, 'rdk', 'component', 'gripper');
 
   if (gripper === undefined) {
-    return toast.error('No gripper component detected.');
+    toast.error('No gripper component detected.');
+    return;
   }
 
   /*
@@ -424,7 +427,8 @@ const handleMove = () => {
   const [motion] = filterResources(props.resources, 'rdk', 'service', 'motion');
 
   if (motion === undefined) {
-    return toast.error('No motion service detected.');
+    toast.error('No motion service detected.');
+    return;
   }
 
   const req = new motionApi.MoveRequest();
@@ -446,14 +450,16 @@ const handleMove = () => {
   componentName.setName(gripper.name);
   req.setComponentName(componentName);
 
-  props.client.motionService.move(req, new grpc.Metadata(), (error, response) => {
-    if (error) {
-      toast.error(`Error moving: ${error}`);
-      return;
-    }
+  props.client.motionService.move(
+    req, new grpc.Metadata(), (error: ServiceError, response: motionApi.MoveResponse) => {
+      if (error) {
+        toast.error(`Error moving: ${error}`);
+        return;
+      }
 
-    toast.success(`Move success: ${response!.getSuccess()}`);
-  });
+      toast.success(`Move success: ${response!.getSuccess()}`);
+    }
+  );
 };
 
 const handleCenter = () => {
@@ -524,7 +530,9 @@ const init = (pointcloud: Uint8Array) => {
   // eslint-disable-next-line unicorn/text-encoding-identifier-case
   const decoder = new TextDecoder('utf-8');
   const file = new File([decoder.decode(pointcloud)], 'pointcloud.txt');
-  download.href = URL.createObjectURL(file);
+  if (download) {
+    download.href = URL.createObjectURL(file);
+  }
 
   if (props.cameraName) {
     getSegmenterNames();
@@ -532,7 +540,7 @@ const init = (pointcloud: Uint8Array) => {
 };
 
 onMounted(() => {
-  container.append(renderer.domElement);
+  container?.append(renderer.domElement);
   renderer.setAnimationLoop(animate);
 
   if (props.pointcloud) {
@@ -579,8 +587,8 @@ watch(() => props.pointcloud, (updated?: Uint8Array) => {
       @mouseup="handleCanvasMouseUp"
     />
 
-    <div class="relative flex flex-wrap w-full items-center justify-between gap-12">
-      <div class="w-full pl-4 pt-2 max-w-xs">
+    <div class="relative flex w-full flex-wrap items-center justify-between gap-12">
+      <div class="w-full max-w-xs pl-4 pt-2">
         <v-slider
           label="Points Scaling"
           min="0.1"
@@ -723,7 +731,7 @@ watch(() => props.pointcloud, (updated?: Uint8Array) => {
       </div>
       <div
         v-if="false"
-        class="flex pt-4 pb-8"
+        class="flex pb-8 pt-4"
       >
         <div class="column">
           <v-radio

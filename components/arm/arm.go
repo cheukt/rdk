@@ -10,6 +10,7 @@ import (
 
 	"github.com/edaniels/golog"
 	pb "go.viam.com/api/component/arm/v1"
+	motionpb "go.viam.com/api/service/motion/v1"
 	viamutils "go.viam.com/utils"
 	"go.viam.com/utils/rpc"
 
@@ -21,7 +22,6 @@ import (
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
-	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/subtype"
 	"go.viam.com/rdk/utils"
@@ -66,9 +66,12 @@ const (
 // and there are joints which are out of bounds.
 const MTPoob = "cartesian movements are not allowed when arm joints are out of bounds"
 
-var defaultArmPlannerOptions = map[string]interface{}{
-	"motion_profile": motionplan.LinearMotionProfile,
-}
+var (
+	defaultLinearConstraint  = &motionpb.LinearConstraint{}
+	defaultArmPlannerOptions = &motionpb.Constraints{
+		LinearConstraint: []*motionpb.LinearConstraint{defaultLinearConstraint},
+	}
+)
 
 // Subtype is a constant that identifies the component resource subtype.
 var Subtype = resource.NewSubtype(
@@ -88,9 +91,8 @@ type Arm interface {
 	EndPosition(ctx context.Context, extra map[string]interface{}) (spatialmath.Pose, error)
 
 	// MoveToPosition moves the arm to the given absolute position.
-	// The worldState argument should be treated as optional by all implementing drivers
 	// This will block until done or a new operation cancels this one
-	MoveToPosition(ctx context.Context, pose spatialmath.Pose, worldState *referenceframe.WorldState, extra map[string]interface{}) error
+	MoveToPosition(ctx context.Context, pose spatialmath.Pose, extra map[string]interface{}) error
 
 	// MoveToJointPositions moves the arm's joints to the given positions.
 	// This will block until done or a new operation cancels this one
@@ -134,23 +136,10 @@ func NewUnimplementedLocalInterfaceError(actual interface{}) error {
 	return utils.NewUnimplementedInterfaceError((*LocalArm)(nil), actual)
 }
 
-// DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name string, actual interface{}) error {
-	return utils.DependencyTypeError(name, (*Arm)(nil), actual)
-}
-
 // FromDependencies is a helper for getting the named arm from a collection of
 // dependencies.
 func FromDependencies(deps registry.Dependencies, name string) (Arm, error) {
-	res, ok := deps[Named(name)]
-	if !ok {
-		return nil, utils.DependencyNotFoundError(name)
-	}
-	part, ok := res.(Arm)
-	if !ok {
-		return nil, DependencyTypeError(name, res)
-	}
-	return part, nil
+	return registry.ResourceFromDependencies[Arm](deps, Named(name))
 }
 
 // FromRobot is a helper for getting the named Arm from the given Robot.
@@ -216,12 +205,11 @@ func (r *reconfigurableArm) EndPosition(ctx context.Context, extra map[string]in
 func (r *reconfigurableArm) MoveToPosition(
 	ctx context.Context,
 	pose spatialmath.Pose,
-	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.actual.MoveToPosition(ctx, pose, worldState, extra)
+	return r.actual.MoveToPosition(ctx, pose, extra)
 }
 
 func (r *reconfigurableArm) MoveToJointPositions(ctx context.Context, positionDegs *pb.JointPositions, extra map[string]interface{}) error {
@@ -353,7 +341,7 @@ func WrapWithReconfigurable(r interface{}, name resource.Name) (resource.Reconfi
 }
 
 // Move is a helper function to abstract away movement for general arms.
-func Move(ctx context.Context, r robot.Robot, a Arm, dst spatialmath.Pose, worldState *referenceframe.WorldState) error {
+func Move(ctx context.Context, logger golog.Logger, a Arm, dst spatialmath.Pose) error {
 	joints, err := a.JointPositions(ctx, nil)
 	if err != nil {
 		return err
@@ -367,7 +355,7 @@ func Move(ctx context.Context, r robot.Robot, a Arm, dst spatialmath.Pose, world
 		return err
 	}
 
-	solution, err := Plan(ctx, r, a, dst, worldState)
+	solution, err := Plan(ctx, logger, a, dst)
 	if err != nil {
 		return err
 	}
@@ -376,40 +364,13 @@ func Move(ctx context.Context, r robot.Robot, a Arm, dst spatialmath.Pose, world
 
 // Plan is a helper function to be called by arm implementations to abstract away the default procedure for using the
 // motion planning library with arms.
-func Plan(
-	ctx context.Context,
-	r robot.Robot,
-	a Arm,
-	dst spatialmath.Pose,
-	worldState *referenceframe.WorldState,
-) ([][]referenceframe.Input, error) {
-	// build the framesystem
-	fs, err := framesystem.RobotFrameSystem(ctx, r, worldState.Transforms)
+func Plan(ctx context.Context, logger golog.Logger, a Arm, dst spatialmath.Pose) ([][]referenceframe.Input, error) {
+	armFrame := a.ModelFrame()
+	jp, err := a.JointPositions(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	armName := a.ModelFrame().Name()
-	destination := referenceframe.NewPoseInFrame(armName+"_origin", dst)
-
-	// PlanRobotMotion needs a frame system which contains the frame being solved for
-	if fs.Frame(armName) == nil {
-		if worldState != nil {
-			if len(worldState.Obstacles) != 0 || len(worldState.Transforms) != 0 {
-				return nil, errors.New("arm must be in frame system to use worldstate")
-			}
-		}
-		armFrame := a.ModelFrame()
-		jp, err := a.JointPositions(ctx, nil)
-		if err != nil {
-			return nil, err
-		}
-		return motionplan.PlanFrameMotion(ctx, r.Logger(), dst, armFrame, armFrame.InputFromProtobuf(jp), defaultArmPlannerOptions)
-	}
-	solutionMap, err := motionplan.PlanRobotMotion(ctx, destination, a.ModelFrame(), r, fs, worldState, defaultArmPlannerOptions)
-	if err != nil {
-		return nil, err
-	}
-	return motionplan.FrameStepsFromRobotPath(a.ModelFrame().Name(), solutionMap)
+	return motionplan.PlanFrameMotion(ctx, logger, dst, armFrame, armFrame.InputFromProtobuf(jp), defaultArmPlannerOptions, nil)
 }
 
 // GoToWaypoints will visit in turn each of the joint position waypoints generated by a motion planner.

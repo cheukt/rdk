@@ -22,7 +22,6 @@ import (
 	"google.golang.org/grpc"
 	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 
-	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/protoutils"
@@ -73,7 +72,7 @@ func (h HandlerMap) ToProto() *pb.HandlerMap {
 // NewHandlerMapFromProto converts protobuf to HandlerMap.
 func NewHandlerMapFromProto(ctx context.Context, pMap *pb.HandlerMap, conn *grpc.ClientConn) (HandlerMap, error) {
 	hMap := make(HandlerMap)
-	refClient := grpcreflect.NewClient(ctx, reflectpb.NewServerReflectionClient(conn))
+	refClient := grpcreflect.NewClientV1Alpha(ctx, reflectpb.NewServerReflectionClient(conn))
 	defer refClient.Reset()
 	reflSource := grpcurl.DescriptorSourceFromServer(ctx, refClient)
 
@@ -178,7 +177,13 @@ func (m *Module) Start(ctx context.Context) error {
 	m.activeBackgroundWorkers.Add(1)
 	utils.PanicCapturingGo(func() {
 		defer m.activeBackgroundWorkers.Done()
-		defer utils.UncheckedErrorFunc(func() error { return os.Remove(m.addr) })
+		defer utils.UncheckedErrorFunc(func() error {
+			// Attempt to remove module's .sock file.
+			if _, err := os.Stat(m.addr); err == nil {
+				return os.Remove(m.addr)
+			}
+			return nil
+		})
 		m.logger.Infof("server listening at %v", lis.Addr())
 		if err := m.server.Serve(lis); err != nil {
 			m.logger.Errorf("failed to serve: %v", err)
@@ -276,6 +281,10 @@ func (m *Module) AddResource(ctx context.Context, req *pb.AddResourceRequest) (*
 		return nil, err
 	}
 
+	if err := addConvertedAttributes(cfg); err != nil {
+		return nil, errors.Wrapf(err, "unable to convert attributes when adding resource")
+	}
+
 	var res interface{}
 	switch cfg.API.ResourceType {
 	case resource.ResourceTypeComponent:
@@ -302,16 +311,6 @@ func (m *Module) AddResource(ctx context.Context, req *pb.AddResourceRequest) (*
 	subSvc, ok := m.services[cfg.API]
 	if !ok {
 		return nil, errors.Errorf("module cannot service api: %s", cfg.API)
-	}
-
-	if cfg.API.ResourceType == resource.ResourceTypeComponent && cfg.API != generic.Subtype {
-		genSvc, ok := m.services[generic.Subtype]
-		if !ok {
-			return nil, errors.New("module cannot service the generic API")
-		}
-		if err := genSvc.Add(cfg.ResourceName(), res); err != nil {
-			return nil, err
-		}
 	}
 
 	return &pb.AddResourceResponse{}, subSvc.Add(cfg.ResourceName(), res)
@@ -373,16 +372,6 @@ func (m *Module) ReconfigureResource(ctx context.Context, req *pb.ReconfigureRes
 				return nil, err
 			}
 
-			if cfg.API != generic.Subtype {
-				genSvc, ok := m.services[generic.Subtype]
-				if !ok {
-					return nil, errors.New("no generic service")
-				}
-				if err := genSvc.ReplaceOne(cfg.ResourceName(), comp); err != nil {
-					return nil, err
-				}
-			}
-
 			return &pb.ReconfigureResourceResponse{}, svc.ReplaceOne(cfg.ResourceName(), comp)
 		}
 
@@ -401,6 +390,41 @@ func (m *Module) ReconfigureResource(ctx context.Context, req *pb.ReconfigureRes
 	}
 
 	return nil, errors.Errorf("can't recreate resource %+v", req.Config)
+}
+
+// Validator is a resource configuration object that implements Validate.
+type Validator interface {
+	// Validate ensures that the object is valid and returns any implicit dependencies.
+	Validate(path string) ([]string, error)
+}
+
+// ValidateConfig receives the validation request for a resource from the parent.
+func (m *Module) ValidateConfig(ctx context.Context,
+	req *pb.ValidateConfigRequest,
+) (*pb.ValidateConfigResponse, error) {
+	c, err := config.ComponentConfigFromProto(req.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := addConvertedAttributes(c); err != nil {
+		return nil, errors.Wrapf(err, "unable to convert attributes for validation")
+	}
+
+	if c.ConvertedAttributes != nil {
+		validator, ok := c.ConvertedAttributes.(Validator)
+		if ok {
+			implicitDeps, err := validator.Validate(c.Name)
+			if err != nil {
+				return nil, errors.Wrapf(err, "error validating resource")
+			}
+			return &pb.ValidateConfigResponse{Dependencies: implicitDeps}, nil
+		}
+	}
+
+	// Resource configuration object does not implement Validate, but return an
+	// empty response and no error to maintain backward compatibility.
+	return &pb.ValidateConfigResponse{}, nil
 }
 
 // RemoveResource receives the request for resource removal.
@@ -426,16 +450,6 @@ func (m *Module) RemoveResource(ctx context.Context, req *pb.RemoveResourceReque
 	comp := svc.Resource(name.Name)
 	if err := utils.TryClose(ctx, comp); err != nil {
 		m.logger.Error(err)
-	}
-
-	if name.Subtype.ResourceType == resource.ResourceTypeComponent && name.Subtype != generic.Subtype {
-		genSvc, ok := m.services[generic.Subtype]
-		if !ok {
-			return nil, errors.New("no generic service")
-		}
-		if err := genSvc.Remove(name); err != nil {
-			return nil, err
-		}
 	}
 
 	return &pb.RemoveResourceResponse{}, svc.Remove(name)
@@ -468,16 +482,9 @@ func (m *Module) addAPIFromRegistry(ctx context.Context, api resource.Subtype) e
 func (m *Module) AddModelFromRegistry(ctx context.Context, api resource.Subtype, model resource.Model) error {
 	m.mu.Lock()
 	_, ok := m.services[api]
-	_, okGeneric := m.services[generic.Subtype]
 	m.mu.Unlock()
 	if !ok {
 		if err := m.addAPIFromRegistry(ctx, api); err != nil {
-			return err
-		}
-	}
-
-	if api.ResourceType == resource.ResourceTypeComponent && !okGeneric && api != generic.Subtype {
-		if err := m.addAPIFromRegistry(ctx, generic.Subtype); err != nil {
 			return err
 		}
 	}
@@ -501,4 +508,24 @@ func (m *Module) AddModelFromRegistry(ctx context.Context, api resource.Subtype,
 // OperationManager returns the operation manager for the module.
 func (m *Module) OperationManager() *operation.Manager {
 	return m.operations
+}
+
+// addConvertedAttributesToConfig uses the MapAttributeConverter to fill in the
+// ConvertedAttributes field from the Attributes.
+func addConvertedAttributes(cfg *config.Component) error {
+	// Try to find map converter for a component.
+	conv := config.FindMapConverter(cfg.API, cfg.Model)
+	// If no map converter for a component exists, try to find map converter for a
+	// service.
+	if conv == nil {
+		conv = config.FindServiceMapConverter(cfg.API, cfg.Model)
+	}
+	if conv != nil {
+		converted, err := conv(cfg.Attributes)
+		if err != nil {
+			return errors.Wrapf(err, "error converting attributes for resource")
+		}
+		cfg.ConvertedAttributes = converted
+	}
+	return nil
 }

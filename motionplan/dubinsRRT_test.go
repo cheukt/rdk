@@ -36,11 +36,13 @@ func TestDubinsRRT(t *testing.T) {
 
 	testDubin := func(worldState *frame.WorldState) bool {
 		opt := newBasicPlannerOptions()
-		collisionConstraint, err := newObstacleConstraint(dubins.Frame(), fs, worldState, frame.StartPositions(fs), nil, true)
-		if err != nil {
-			return false
+		sf, err := newSolverFrame(fs, model.Name(), frame.World, frame.StartPositions(fs))
+		test.That(t, err, test.ShouldBeNil)
+		collisionConstraints, err := createAllCollisionConstraints(sf, fs, worldState, frame.StartPositions(fs), nil)
+		test.That(t, err, test.ShouldBeNil)
+		for name, constraint := range collisionConstraints {
+			opt.AddStateConstraint(name, constraint)
 		}
-		opt.AddConstraint("collision", collisionConstraint)
 		o := d.AllPaths(start, goal, false)
 		return dubins.checkPath(
 			&basicNode{q: frame.FloatsToInputs(start)},
@@ -55,13 +57,12 @@ func TestDubinsRRT(t *testing.T) {
 	test.That(t, testDubin(&frame.WorldState{}), test.ShouldBeTrue)
 
 	// case with obstacles
-	obstacleGeometries := map[string]spatial.Geometry{}
 	box, err := spatial.NewBox(spatial.NewPoseFromPoint(
 		r3.Vector{X: 5, Y: 0, Z: 0}), // Center of box
 		r3.Vector{X: 1, Y: 20, Z: 1}, // Dimensions of box
 		"")
 	test.That(t, err, test.ShouldEqual, nil)
-	obstacleGeometries["1"] = box
+	obstacleGeometries := []spatial.Geometry{box}
 	worldState := &frame.WorldState{Obstacles: []*frame.GeometriesInFrame{frame.NewGeometriesInFrame(frame.World, obstacleGeometries)}}
 	test.That(t, testDubin(worldState), test.ShouldBeFalse)
 }

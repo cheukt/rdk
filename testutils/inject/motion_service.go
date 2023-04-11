@@ -3,9 +3,12 @@ package inject
 import (
 	"context"
 
+	servicepb "go.viam.com/api/service/motion/v1"
+
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
+	"go.viam.com/rdk/spatialmath"
 )
 
 // MotionService represents a fake instance of an motion
@@ -13,6 +16,22 @@ import (
 type MotionService struct {
 	motion.Service
 	MoveFunc func(
+		ctx context.Context,
+		componentName resource.Name,
+		grabPose *referenceframe.PoseInFrame,
+		worldState *referenceframe.WorldState,
+		constraints *servicepb.Constraints,
+		extra map[string]interface{},
+	) (bool, error)
+	MoveOnMapFunc func(
+		ctx context.Context,
+		componentName resource.Name,
+		destination spatialmath.Pose,
+		worldState *referenceframe.WorldState,
+		slamName resource.Name,
+		extra map[string]interface{},
+	) (bool, error)
+	MoveSingleComponentFunc func(
 		ctx context.Context,
 		componentName resource.Name,
 		grabPose *referenceframe.PoseInFrame,
@@ -34,28 +53,43 @@ type MotionService struct {
 func (mgs *MotionService) Move(
 	ctx context.Context,
 	componentName resource.Name,
-	grabPose *referenceframe.PoseInFrame,
+	destination *referenceframe.PoseInFrame,
 	worldState *referenceframe.WorldState,
+	constraints *servicepb.Constraints,
 	extra map[string]interface{},
 ) (bool, error) {
 	if mgs.MoveFunc == nil {
-		return mgs.Service.Move(ctx, componentName, grabPose, worldState, extra)
+		return mgs.Service.Move(ctx, componentName, destination, worldState, constraints, extra)
 	}
-	return mgs.MoveFunc(ctx, componentName, grabPose, worldState, extra)
+	return mgs.MoveFunc(ctx, componentName, destination, worldState, constraints, extra)
+}
+
+// MoveOnMap calls the inkected MoveOnMap or the real variant.
+func (mgs *MotionService) MoveOnMap(
+	ctx context.Context,
+	componentName resource.Name,
+	destination spatialmath.Pose,
+	slamName resource.Name,
+	extra map[string]interface{},
+) (bool, error) {
+	if mgs.MoveOnMapFunc == nil {
+		return mgs.Service.MoveOnMap(ctx, componentName, destination, slamName, extra)
+	}
+	return mgs.MoveOnMap(ctx, componentName, destination, slamName, extra)
 }
 
 // MoveSingleComponent calls the injected MoveSingleComponent or the real variant. It uses the same function as Move.
 func (mgs *MotionService) MoveSingleComponent(
 	ctx context.Context,
 	componentName resource.Name,
-	grabPose *referenceframe.PoseInFrame,
+	destination *referenceframe.PoseInFrame,
 	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	if mgs.MoveFunc == nil {
-		return mgs.Service.MoveSingleComponent(ctx, componentName, grabPose, worldState, extra)
+		return mgs.Service.MoveSingleComponent(ctx, componentName, destination, worldState, extra)
 	}
-	return mgs.MoveFunc(ctx, componentName, grabPose, worldState, extra)
+	return mgs.MoveSingleComponentFunc(ctx, componentName, destination, worldState, extra)
 }
 
 // GetPose calls the injected GetPose or the real variant.

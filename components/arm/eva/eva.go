@@ -30,7 +30,6 @@ import (
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/spatialmath"
 )
 
@@ -48,8 +47,8 @@ var evamodeljson []byte
 
 func init() {
 	registry.RegisterComponent(arm.Subtype, ModelName, registry.Component{
-		RobotConstructor: func(ctx context.Context, r robot.Robot, config config.Component, logger golog.Logger) (interface{}, error) {
-			return NewEva(ctx, r, config, logger)
+		Constructor: func(ctx context.Context, _ registry.Dependencies, config config.Component, logger golog.Logger) (interface{}, error) {
+			return NewEva(ctx, config, logger)
 		},
 	})
 
@@ -77,11 +76,9 @@ type evaData struct {
 	// [0.0008628905634395778 0 0.0002876301878131926 0 -0.00038350690738298 0.0005752603756263852]
 	ServosPosition []float64 `json:"servos.telemetry.position"`
 
-	//nolint:dupword
 	// [53.369998931884766 43.75 43.869998931884766 43.869998931884766 51 48.619998931884766]
 	ServosTemperature []float64 `json:"servos.telemetry.temperature"`
 
-	//nolint:dupword
 	// [0 0 0 0 0 0]
 	ServosVelocity []float64 `json:"servos.telemetry.velocity"`
 
@@ -99,7 +96,6 @@ type eva struct {
 	moveLock *sync.Mutex
 	logger   golog.Logger
 	model    referenceframe.Model
-	robot    robot.Robot
 
 	frameJSON []byte
 
@@ -107,7 +103,7 @@ type eva struct {
 }
 
 // NewEva TODO.
-func NewEva(ctx context.Context, r robot.Robot, cfg config.Component, logger golog.Logger) (arm.LocalArm, error) {
+func NewEva(ctx context.Context, cfg config.Component, logger golog.Logger) (arm.LocalArm, error) {
 	model, err := Model(cfg.Name)
 	if err != nil {
 		return nil, err
@@ -120,7 +116,6 @@ func NewEva(ctx context.Context, r robot.Robot, cfg config.Component, logger gol
 		logger:    logger,
 		moveLock:  &sync.Mutex{},
 		model:     model,
-		robot:     r,
 		frameJSON: evamodeljson,
 	}
 
@@ -152,15 +147,10 @@ func (e *eva) EndPosition(ctx context.Context, extra map[string]interface{}) (sp
 }
 
 // MoveToPosition moves the arm to the specified cartesian position.
-func (e *eva) MoveToPosition(
-	ctx context.Context,
-	pos spatialmath.Pose,
-	worldState *referenceframe.WorldState,
-	extra map[string]interface{},
-) error {
+func (e *eva) MoveToPosition(ctx context.Context, pos spatialmath.Pose, extra map[string]interface{}) error {
 	ctx, done := e.opMgr.New(ctx)
 	defer done()
-	return arm.Move(ctx, e.robot, e, pos, worldState)
+	return arm.Move(ctx, e.logger, e, pos)
 }
 
 func (e *eva) MoveToJointPositions(ctx context.Context, newPositions *pb.JointPositions, extra map[string]interface{}) error {

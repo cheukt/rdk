@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/benbjohnson/clock"
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
@@ -31,21 +32,24 @@ type CaptureFunc func(ctx context.Context, params map[string]*anypb.Any) (interf
 type Collector interface {
 	Close()
 	Collect()
+	Flush()
 }
 
 type collector struct {
-	queue             chan *v1.SensorData
-	interval          time.Duration
-	params            map[string]*anypb.Any
-	lock              *sync.Mutex
-	logger            golog.Logger
-	backgroundWorkers sync.WaitGroup
-	cancelCtx         context.Context
-	cancel            context.CancelFunc
-	captureFunc       CaptureFunc
-	closed            bool
-
-	target *datacapture.Buffer
+	clock          clock.Clock
+	captureResults chan *v1.SensorData
+	captureErrors  chan error
+	interval       time.Duration
+	params         map[string]*anypb.Any
+	lock           *sync.Mutex
+	logger         golog.Logger
+	captureWorkers sync.WaitGroup
+	logRoutine     sync.WaitGroup
+	cancelCtx      context.Context
+	cancel         context.CancelFunc
+	captureFunc    CaptureFunc
+	closed         bool
+	target         datacapture.BufferedWriter
 }
 
 // Close closes the channels backing the Collector. It should always be called before disposing of a Collector to avoid
@@ -54,70 +58,87 @@ func (c *collector) Close() {
 	if c.closed {
 		return
 	}
+	c.closed = true
+
 	c.cancel()
-	c.backgroundWorkers.Wait()
+	c.captureWorkers.Wait()
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	if err := c.target.Flush(); err != nil {
-		c.logger.Errorw("failed to flush capture queue", "error", err)
+		c.logger.Errorw("failed to flush capture data", "error", err)
 	}
-	if err := c.logger.Sync(); err != nil {
-		c.logger.Errorw("failed to sync logger", "error", err)
+	close(c.captureErrors)
+	c.logRoutine.Wait()
+	//nolint:errcheck
+	_ = c.logger.Sync()
+}
+
+func (c *collector) Flush() {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if err := c.target.Flush(); err != nil {
+		c.logger.Errorw("failed to flush collector", "error", err)
 	}
-	c.closed = true
 }
 
 // Collect starts the Collector, causing it to run c.capturer.Capture every c.interval, and write the results to
-// c.target.
+// c.target. It blocks until the underlying capture goroutine starts.
 func (c *collector) Collect() {
 	_, span := trace.StartSpan(c.cancelCtx, "data::collector::Collect")
 	defer span.End()
 
-	c.backgroundWorkers.Add(1)
+	started := make(chan struct{})
+	c.captureWorkers.Add(1)
 	utils.PanicCapturingGo(func() {
-		defer c.backgroundWorkers.Done()
-		c.capture()
+		defer c.captureWorkers.Done()
+		c.capture(started)
 	})
-	c.backgroundWorkers.Add(1)
+	c.captureWorkers.Add(1)
 	utils.PanicCapturingGo(func() {
-		defer c.backgroundWorkers.Done()
-		if err := c.write(); err != nil {
-			c.logger.Errorw(fmt.Sprintf("failed to write to collector %s", c.target.Directory), "error", err)
+		defer c.captureWorkers.Done()
+		if err := c.writeCaptureResults(); err != nil {
+			c.captureErrors <- errors.Wrap(err, fmt.Sprintf("failed to write to collector %s", c.target.Path()))
 		}
 	})
+	c.logRoutine.Add(1)
+	utils.PanicCapturingGo(func() {
+		defer c.logRoutine.Done()
+		c.logCaptureErrs()
+	})
+	<-started
 }
 
 // Go's time.Ticker has inconsistent performance with durations of below 1ms [0], so we use a time.Sleep based approach
 // when the configured capture interval is below 2ms. A Ticker based approach is kept for longer capture intervals to
 // avoid wasting CPU on a thread that's idling for the vast majority of the time.
 // [0]: https://www.mail-archive.com/golang-nuts@googlegroups.com/msg46002.html
-func (c *collector) capture() {
+func (c *collector) capture(started chan struct{}) {
 	if c.interval < sleepCaptureCutoff {
-		c.sleepBasedCapture()
+		c.sleepBasedCapture(started)
 	} else {
-		c.tickerBasedCapture()
+		c.tickerBasedCapture(started)
 	}
 }
 
-func (c *collector) sleepBasedCapture() {
-	next := time.Now().Add(c.interval)
+func (c *collector) sleepBasedCapture(started chan struct{}) {
+	next := c.clock.Now().Add(c.interval)
+	until := c.clock.Until(next)
 	captureWorkers := sync.WaitGroup{}
 
+	close(started)
 	for {
-		time.Sleep(time.Until(next))
 		if err := c.cancelCtx.Err(); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				c.logger.Errorw("unexpected error in collector context", "error", err)
-			}
+			c.captureErrors <- errors.Wrap(err, "error in context")
 			captureWorkers.Wait()
-			close(c.queue)
+			close(c.captureResults)
 			return
 		}
+		c.clock.Sleep(until)
 
 		select {
 		case <-c.cancelCtx.Done():
 			captureWorkers.Wait()
-			close(c.queue)
+			close(c.captureResults)
 			return
 		default:
 			captureWorkers.Add(1)
@@ -127,28 +148,28 @@ func (c *collector) sleepBasedCapture() {
 			})
 		}
 		next = next.Add(c.interval)
+		until = c.clock.Until(next)
 	}
 }
 
-func (c *collector) tickerBasedCapture() {
-	ticker := time.NewTicker(c.interval)
+func (c *collector) tickerBasedCapture(started chan struct{}) {
+	ticker := c.clock.Ticker(c.interval)
 	defer ticker.Stop()
 	captureWorkers := sync.WaitGroup{}
 
+	close(started)
 	for {
 		if err := c.cancelCtx.Err(); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				c.logger.Errorw("unexpected error in collector context", "error", err)
-			}
+			c.captureErrors <- errors.Wrap(err, "error in context")
 			captureWorkers.Wait()
-			close(c.queue)
+			close(c.captureResults)
 			return
 		}
 
 		select {
 		case <-c.cancelCtx.Done():
 			captureWorkers.Wait()
-			close(c.queue)
+			close(c.captureResults)
 			return
 		case <-ticker.C:
 			captureWorkers.Add(1)
@@ -161,15 +182,11 @@ func (c *collector) tickerBasedCapture() {
 }
 
 func (c *collector) getAndPushNextReading() {
-	timeRequested := timestamppb.New(time.Now().UTC())
+	timeRequested := timestamppb.New(c.clock.Now().UTC())
 	reading, err := c.captureFunc(c.cancelCtx, c.params)
-	timeReceived := timestamppb.New(time.Now().UTC())
+	timeReceived := timestamppb.New(c.clock.Now().UTC())
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			c.logger.Debugw("error while capturing data", "error", err)
-			return
-		}
-		c.logger.Errorw("error while capturing data", "error", err)
+		c.captureErrors <- errors.Wrap(err, "error while capturing data")
 		return
 	}
 
@@ -189,7 +206,7 @@ func (c *collector) getAndPushNextReading() {
 		// If it's not bytes, it's a struct.
 		pbReading, err := protoutils.StructToStructPb(reading)
 		if err != nil {
-			c.logger.Errorw("error while converting reading to structpb.Struct", "error", err)
+			c.captureErrors <- errors.Wrap(err, "error while converting reading to structpb.Struct")
 			return
 		}
 
@@ -205,12 +222,10 @@ func (c *collector) getAndPushNextReading() {
 	}
 
 	select {
-	// If c.queue is full, c.queue <- a can block indefinitely. This additional select block allows cancel to
+	// If c.captureResults is full, c.captureResults <- a can block indefinitely. This additional select block allows cancel to
 	// still work when this happens.
 	case <-c.cancelCtx.Done():
-		return
-	case c.queue <- &msg:
-		return
+	case c.captureResults <- &msg:
 	}
 }
 
@@ -222,27 +237,50 @@ func NewCollector(captureFunc CaptureFunc, params CollectorParams) (Collector, e
 	}
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	var c clock.Clock
+	if params.Clock == nil {
+		c = clock.New()
+	} else {
+		c = params.Clock
+	}
 	return &collector{
-		queue:             make(chan *v1.SensorData, params.QueueSize),
-		interval:          params.Interval,
-		params:            params.MethodParams,
-		lock:              &sync.Mutex{},
-		logger:            params.Logger,
-		backgroundWorkers: sync.WaitGroup{},
-		cancelCtx:         cancelCtx,
-		cancel:            cancelFunc,
-		captureFunc:       captureFunc,
-		target:            params.Target,
+		captureResults: make(chan *v1.SensorData, params.QueueSize),
+		captureErrors:  make(chan error, params.QueueSize),
+		interval:       params.Interval,
+		params:         params.MethodParams,
+		lock:           &sync.Mutex{},
+		logger:         params.Logger,
+		captureWorkers: sync.WaitGroup{},
+		logRoutine:     sync.WaitGroup{},
+		cancelCtx:      cancelCtx,
+		cancel:         cancelFunc,
+		captureFunc:    captureFunc,
+		target:         params.Target,
+		clock:          c,
+		closed:         false,
 	}, nil
 }
 
-func (c *collector) write() error {
-	for msg := range c.queue {
+func (c *collector) writeCaptureResults() error {
+	for msg := range c.captureResults {
 		if err := c.target.Write(msg); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *collector) logCaptureErrs() {
+	for err := range c.captureErrors {
+		if c.closed {
+			// Don't log context cancellation errors if the collector has already been closed. This means the collector
+			// cancelled the context, and the context cancellation error is expected.
+			if errors.Is(err, context.Canceled) {
+				continue
+			}
+		}
+		c.logger.Error(err)
+	}
 }
 
 // InvalidInterfaceErr is the error describing when an interface not conforming to the expected resource.Subtype was

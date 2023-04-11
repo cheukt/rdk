@@ -2,10 +2,17 @@ package builtin
 
 import (
 	"context"
+	clk "github.com/benbjohnson/clock"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
+	v1 "go.viam.com/api/app/datasync/v1"
 	"go.viam.com/rdk/config"
+	"go.viam.com/rdk/services/datamanager/datacapture"
 	"go.viam.com/test"
 )
 
@@ -16,11 +23,50 @@ var (
 	enabledBinaryCollectorConfigPath            = "services/datamanager/data/robot_with_cam_capture.json"
 	infrequentCaptureTabularCollectorConfigPath = "services/datamanager/data/fake_robot_with_infrequent_capture.json"
 	remoteCollectorConfigPath                   = "services/datamanager/data/fake_robot_with_remote_and_data_manager.json"
-	emptyFileBytesSize                          = 30 // size of leading metadata message
+	emptyFileBytesSize                          = 100 // size of leading metadata message
 )
 
 func TestDataCaptureEnabled(t *testing.T) {
-	captureTime := time.Millisecond * 25
+	// passTime repeatedly increments mc by interval until the context is canceled.
+	passTime := func(ctx context.Context, mc *clk.Mock, interval time.Duration) chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					close(done)
+					return
+				default:
+					mc.Add(interval)
+				}
+			}
+		}()
+		return done
+	}
+
+	captureInterval := time.Millisecond * 10
+	testFilesContainSensorData := func(t *testing.T, dir string) {
+		t.Helper()
+		var sd []*v1.SensorData
+		filePaths := getAllFilePaths(dir)
+		for _, path := range filePaths {
+			d, err := datacapture.SensorDataFromFilePath(path)
+			// It's possible a file was closed (and so its extension changed) in between the points where we gathered
+			// file names and here. So if the file does not exist, check if the extension has just been changed.
+			if errors.Is(err, os.ErrNotExist) {
+				path = strings.TrimSuffix(path, filepath.Ext(path)) + datacapture.FileExt
+				d, err = datacapture.SensorDataFromFilePath(path)
+			}
+			test.That(t, err, test.ShouldBeNil)
+			sd = append(sd, d...)
+		}
+
+		test.That(t, len(sd), test.ShouldBeGreaterThan, 0)
+		for _, d := range sd {
+			test.That(t, d.GetStruct(), test.ShouldNotBeNil)
+			test.That(t, d.GetMetadata(), test.ShouldNotBeNil)
+		}
+	}
 
 	tests := []struct {
 		name                          string
@@ -90,6 +136,9 @@ func TestDataCaptureEnabled(t *testing.T) {
 			// Set up capture directories.
 			initCaptureDir := t.TempDir()
 			updatedCaptureDir := t.TempDir()
+			mockClock := clk.NewMock()
+			// Make mockClock the package level clock used by the dmsvc so that we can simulate time's passage
+			clock = mockClock
 
 			// Set up robot config.
 			var initConfig *config.Config
@@ -111,9 +160,23 @@ func TestDataCaptureEnabled(t *testing.T) {
 
 			// Build and start data manager.
 			dmsvc := newTestDataManager(t)
-			defer dmsvc.Close(context.Background())
+			defer func() {
+				test.That(t, dmsvc.Close(context.Background()), test.ShouldBeNil)
+			}()
 			err = dmsvc.Update(context.Background(), initConfig)
-			time.Sleep(captureTime)
+			test.That(t, err, test.ShouldBeNil)
+			passTimeCtx1, cancelPassTime1 := context.WithCancel(context.Background())
+			donePassingTime1 := passTime(passTimeCtx1, mockClock, captureInterval)
+
+			if !tc.initialServiceDisableStatus && !tc.initialCollectorDisableStatus {
+				waitForCaptureFiles(initCaptureDir)
+				testFilesContainSensorData(t, initCaptureDir)
+			} else {
+				initialCaptureFiles := getAllFileInfos(initCaptureDir)
+				test.That(t, len(initialCaptureFiles), test.ShouldEqual, 0)
+			}
+			cancelPassTime1()
+			<-donePassingTime1
 
 			// Set up updated robot config.
 			var updatedConfig *config.Config
@@ -134,28 +197,38 @@ func TestDataCaptureEnabled(t *testing.T) {
 			// Update to new config and let it run for a bit.
 			err = dmsvc.Update(context.Background(), updatedConfig)
 			test.That(t, err, test.ShouldBeNil)
-			time.Sleep(captureTime)
+			oldCaptureDirFiles := getAllFileInfos(initCaptureDir)
+			passTimeCtx2, cancelPassTime2 := context.WithCancel(context.Background())
+			donePassingTime2 := passTime(passTimeCtx2, mockClock, captureInterval)
 
-			// Check if initial config captured (or not) as we'd expect.
-			initialCaptureFiles := getAllFiles(initCaptureDir)
-			if !tc.initialServiceDisableStatus && !tc.initialCollectorDisableStatus {
-				// TODO: check contents
-				test.That(t, len(initialCaptureFiles), test.ShouldBeGreaterThan, 0)
-				test.That(t, initialCaptureFiles[0].Size(), test.ShouldBeGreaterThan, emptyFileBytesSize)
-			} else {
-				test.That(t, len(initialCaptureFiles), test.ShouldEqual, 0)
-			}
-
-			// Check if updated config captured (or not) as we'd expect.
-			updatedCaptureFiles := getAllFiles(updatedCaptureDir)
 			if !tc.newServiceDisableStatus && !tc.newCollectorDisableStatus {
-				//TODO: check contents
-				test.That(t, len(updatedCaptureFiles), test.ShouldBeGreaterThan, 0)
-				test.That(t, updatedCaptureFiles[0].Size(), test.ShouldBeGreaterThan, emptyFileBytesSize)
+				waitForCaptureFiles(updatedCaptureDir)
+				testFilesContainSensorData(t, updatedCaptureDir)
 			} else {
+				updatedCaptureFiles := getAllFileInfos(updatedCaptureDir)
 				test.That(t, len(updatedCaptureFiles), test.ShouldEqual, 0)
+				oldCaptureDirFilesAfterWait := getAllFileInfos(initCaptureDir)
+				test.That(t, len(oldCaptureDirFilesAfterWait), test.ShouldEqual, len(oldCaptureDirFiles))
+				for i := range oldCaptureDirFiles {
+					test.That(t, oldCaptureDirFiles[i].Size(), test.ShouldEqual, oldCaptureDirFilesAfterWait[i].Size())
+				}
 			}
-			test.That(t, dmsvc.Close(context.Background()), test.ShouldBeNil)
+			cancelPassTime2()
+			<-donePassingTime2
 		})
+	}
+}
+
+func waitForCaptureFiles(captureDir string) {
+	totalWait := time.Second * 2
+	waitPerCheck := time.Millisecond * 10
+	iterations := int(totalWait / waitPerCheck)
+	files := getAllFileInfos(captureDir)
+	for i := 0; i < iterations; i++ {
+		if len(files) > 0 && files[0].Size() > int64(emptyFileBytesSize) {
+			return
+		}
+		time.Sleep(waitPerCheck)
+		files = getAllFileInfos(captureDir)
 	}
 }

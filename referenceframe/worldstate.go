@@ -1,9 +1,9 @@
 package referenceframe
 
 import (
+	"fmt"
 	"strconv"
 
-	"github.com/pkg/errors"
 	commonpb "go.viam.com/api/common/v1"
 
 	spatial "go.viam.com/rdk/spatialmath"
@@ -14,6 +14,8 @@ type WorldState struct {
 	Obstacles  []*GeometriesInFrame
 	Transforms []*LinkInFrame
 }
+
+const unnamedWorldStateGeometryPrefix = "unnamedWorldStateGeometry_"
 
 // WorldStateFromProtobuf takes the protobuf definition of a WorldState and converts it to a rdk defined WorldState.
 func WorldStateFromProtobuf(proto *commonpb.WorldState) (*WorldState, error) {
@@ -67,22 +69,33 @@ func WorldStateToProtobuf(worldState *WorldState) (*commonpb.WorldState, error) 
 	}, nil
 }
 
-// ToWorldFrame takes a frame system and a set of inputs for that frame system and converts all the geometries
+// ObstaclesInWorldFrame takes a frame system and a set of inputs for that frame system and converts all the obstacles
 // in the WorldState such that they are in the frame system's World reference frame.
-func (ws *WorldState) ToWorldFrame(fs FrameSystem, inputs map[string][]Input) (*WorldState, error) {
+func (ws *WorldState) ObstaclesInWorldFrame(fs FrameSystem, inputs map[string][]Input) (*GeometriesInFrame, error) {
 	transformGeometriesToWorldFrame := func(gfs []*GeometriesInFrame) (*GeometriesInFrame, error) {
-		allGeometries := make(map[string]spatial.Geometry)
-		for name1, gf := range gfs {
+		nameCheck := make(map[string]bool)
+		allGeometries := make([]spatial.Geometry, 0, len(gfs))
+
+		unnamedCount := 1
+
+		for _, gf := range gfs {
 			tf, err := fs.Transform(inputs, gf, World)
 			if err != nil {
 				return nil, err
 			}
-			for name2, g := range tf.(*GeometriesInFrame).Geometries() {
-				geomName := strconv.Itoa(name1) + "_" + name2
-				if _, present := allGeometries[geomName]; present {
-					return nil, errors.New("multiple geometries with the same name")
+			for _, g := range tf.(*GeometriesInFrame).Geometries() {
+				geomName := g.Label()
+				if geomName == "" {
+					geomName = unnamedWorldStateGeometryPrefix + strconv.Itoa(unnamedCount)
+					g.SetLabel(geomName)
+					unnamedCount++
 				}
-				allGeometries[geomName] = g
+
+				if _, present := nameCheck[geomName]; present {
+					return nil, fmt.Errorf("cannot specify multiple geometries with the same name: %s", geomName)
+				}
+				nameCheck[geomName] = true
+				allGeometries = append(allGeometries, g)
 			}
 		}
 		return NewGeometriesInFrame(World, allGeometries), nil
@@ -91,11 +104,5 @@ func (ws *WorldState) ToWorldFrame(fs FrameSystem, inputs map[string][]Input) (*
 	if ws == nil {
 		ws = &WorldState{}
 	}
-	obstacles, err := transformGeometriesToWorldFrame(ws.Obstacles)
-	if err != nil {
-		return nil, err
-	}
-	return &WorldState{
-		Obstacles: []*GeometriesInFrame{obstacles},
-	}, nil
+	return transformGeometriesToWorldFrame(ws.Obstacles)
 }

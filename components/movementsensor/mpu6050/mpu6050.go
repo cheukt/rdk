@@ -20,6 +20,7 @@ package mpu6050
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ import (
 )
 
 var model = resource.NewDefaultModel("gyro-mpu6050")
+
+const (
+	defaultAddressRegister = 117
+	expectedDefaultAddress = 0x68
+	alternateAddress       = 0x69
+)
 
 // AttrConfig is used to configure the attributes of the chip.
 type AttrConfig struct {
@@ -107,6 +114,17 @@ type mpu6050 struct {
 	generic.Unimplemented // Implements DoCommand with an ErrUnimplemented response
 }
 
+func addressReadError(err error, address byte, bus, board string) error {
+	msg := fmt.Sprintf("can't read from I2C address %d on bus %s of board %s",
+		address, bus, board)
+	return errors.Wrap(err, msg)
+}
+
+func unexpectedDeviceError(address, defaultAddress byte) error {
+	return errors.Errorf("unexpected non-MPU6050 device at address %d: response '%d'",
+		address, defaultAddress)
+}
+
 // NewMpu6050 constructs a new Mpu6050 object.
 func NewMpu6050(
 	ctx context.Context,
@@ -134,9 +152,9 @@ func NewMpu6050(
 
 	var address byte
 	if cfg.UseAlternateI2CAddress {
-		address = 0x69
+		address = alternateAddress
 	} else {
-		address = 0x68
+		address = expectedDefaultAddress
 	}
 	logger.Debugf("Using address %d for MPU6050 sensor", address)
 
@@ -147,18 +165,19 @@ func NewMpu6050(
 		logger:            logger,
 		backgroundContext: backgroundContext,
 		cancelFunc:        cancelFunc,
+		// On overloaded boards, the I2C bus can become flaky. Only report errors if at least 5 of
+		// the last 10 attempts to talk to the device have failed.
+		err: movementsensor.NewLastError(10, 5),
 	}
 
 	// To check that we're able to talk to the chip, we should be able to read register 117 and get
 	// back the device's non-alternative address (0x68)
-	defaultAddress, err := sensor.readByte(ctx, 117)
+	defaultAddress, err := sensor.readByte(ctx, defaultAddressRegister)
 	if err != nil {
-		return nil, errors.Errorf("can't read from I2C address %d on bus %s of board %s: '%s'",
-			address, cfg.I2cBus, cfg.BoardName, err.Error())
+		return nil, addressReadError(err, address, cfg.I2cBus, cfg.BoardName)
 	}
-	if defaultAddress != 0x68 {
-		return nil, errors.Errorf("unexpected non-MPU6050 device at address %d: response '%d'",
-			address, defaultAddress)
+	if defaultAddress != expectedDefaultAddress {
+		return nil, unexpectedDeviceError(address, defaultAddress)
 	}
 
 	// The chip starts out in standby mode (the Sleep bit in the power management register defaults
@@ -182,9 +201,10 @@ func NewMpu6050(
 			select {
 			case <-timer.C:
 				rawData, err := sensor.readBlock(sensor.backgroundContext, 59, 14)
+				// Record `err` no matter what: even if it's nil, that's useful information.
+				sensor.err.Set(err)
 				if err != nil {
-					sensor.logger.Infof("error reading MPU6050 sensor: '%s'", err)
-					sensor.err.Set(err)
+					sensor.logger.Errorf("error reading MPU6050 sensor: '%s'", err)
 					continue
 				}
 
@@ -340,16 +360,16 @@ func (mpu *mpu6050) Properties(ctx context.Context, extra map[string]interface{}
 	}, nil
 }
 
-func (mpu *mpu6050) Close(ctx context.Context) {
-	mpu.mu.Lock()
-	defer mpu.mu.Unlock()
-
+func (mpu *mpu6050) Close(ctx context.Context) error {
 	mpu.cancelFunc()
 	mpu.activeBackgroundWorkers.Wait()
 
+	mpu.mu.Lock()
+	defer mpu.mu.Unlock()
 	// Set the Sleep bit (bit 6) in the power control register (register 107).
 	err := mpu.writeByte(ctx, 107, 1<<6)
 	if err != nil {
 		mpu.logger.Error(err)
 	}
+	return err
 }

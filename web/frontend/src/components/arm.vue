@@ -6,7 +6,7 @@ import { displayError } from '../lib/error';
 import { roundTo2Decimals } from '../lib/math';
 import { rcLogConditionally } from '../lib/log';
 
-interface ArmStatus {
+export interface ArmStatus {
   pos_pieces: {
     endPosition: string[]
     endPositionValue: number
@@ -18,21 +18,21 @@ interface ArmStatus {
   }[]
 }
 
-interface RawArmStatus extends ArmStatus {
+export interface RawArmStatus extends ArmStatus {
   joint_positions: {
     values: number[]
   }
   end_position: Record<string, number>
 }
 
-interface Props {
+type Field = 'x' | 'y' | 'z' | 'ox' | 'oy' | 'oz' | 'theta'
+
+const props = defineProps<{
   name: string
   status?: ArmStatus,
   rawStatus?: RawArmStatus
   client: Client
-}
-
-type Field = 'x' | 'y' | 'z' | 'ox' | 'oy' | 'oz' | 'theta'
+}>();
 
 const fieldMap = [
   ['x', 'x'],
@@ -43,8 +43,6 @@ const fieldMap = [
   ['o_y', 'oy'],
   ['o_z', 'oz'],
 ] as const;
-
-const props = defineProps<Props>();
 
 const toggle = $ref<Record<string, ArmStatus>>({});
 
@@ -230,7 +228,7 @@ const armCopyJoints = (status: ArmStatus) => {
       />
     </div>
     <div class="border border-t-0 border-black p-4">
-      <div class="flex flex-wrap gap-4 mb-4">
+      <div class="mb-4 flex flex-wrap gap-4">
         <div
           v-if="toggle[name]"
           class="border border-black p-4"
@@ -246,7 +244,7 @@ const armCopyJoints = (status: ArmStatus) => {
               <label class="py-1 pr-2 text-right">{{ cc.endPosition[1] }}</label>
               <input
                 v-model="cc.endPositionValue"
-                class="border border-black py-1 px-4"
+                class="border border-black px-4 py-1"
               >
             </template>
           </div>
@@ -279,7 +277,7 @@ const armCopyJoints = (status: ArmStatus) => {
               <label class="py-1 pr-2 text-right">Joint {{ bb.joint }}</label>
               <input
                 v-model="bb.jointValue"
-                class="border border-black py-1 px-4"
+                class="border border-black px-4 py-1"
               >
             </template>
           </div>

@@ -1,11 +1,18 @@
 package motionplan
 
 import (
+	"fmt"
 	"math"
+	"strconv"
 
+	pb "go.viam.com/api/service/motion/v1"
+
+	"go.viam.com/rdk/referenceframe"
 	spatial "go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/utils"
 )
+
+const unnamedCollisionGeometryPrefix = "unnamedCollisionGeometry_"
 
 // Collision is a pair of strings corresponding to names of Geometry objects in collision, and a penetrationDepth describing the Euclidean
 // distance a Geometry would have to be moved to resolve the Collision.
@@ -44,6 +51,105 @@ func collisionListsAlmostEqual(cs1, cs2 []Collision) bool {
 		}
 	}
 	return true
+}
+
+func collisionSpecificationsFromProto(
+	pbConstraint []*pb.CollisionSpecification,
+	frameSystemGeometries map[string]*referenceframe.GeometriesInFrame,
+	worldState *referenceframe.WorldState,
+) (allowedCollisions []*Collision, err error) {
+	// List of all names which may be specified for collision ignoring.
+	validGeoms := map[string]bool{}
+
+	addGeomNames := func(parentName string, geomsInFrame *referenceframe.GeometriesInFrame) error {
+		for _, geom := range geomsInFrame.Geometries() {
+			geomName := geom.Label()
+
+			// Ensure we're not double-adding components which only have one geometry, named identically to the component.
+			// Truly anonymous geometries e.g. passed via worldstate are skipped unless they are labeled
+			if (parentName != "" && geomName == parentName) || geomName == "" {
+				continue
+			}
+			if _, ok := validGeoms[geomName]; ok {
+				return fmt.Errorf("geometry %s is specified by name more than once", geomName)
+			}
+			validGeoms[geomName] = true
+		}
+		return nil
+	}
+
+	// Get names of world state obstacles
+	if worldState != nil {
+		for _, geomsInFrame := range worldState.Obstacles {
+			err := addGeomNames("", geomsInFrame)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Get names of all geometries in frame system
+	for frameName, geomsInFrame := range frameSystemGeometries {
+		validGeoms[frameName] = true
+		err = addGeomNames(frameName, geomsInFrame)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// This allows the user to specify an entire component with sub-geometries, e.g. "myUR5arm", and the specification will apply to all
+	// sub-pieces, e.g. myUR5arm:upper_arm_link, myUR5arm:base_link, etc. Individual sub-pieces may also be so addressed.
+	var allowNameToSubGeoms func(cName string) ([]string, error) // Pre-define to allow recursive call
+	allowNameToSubGeoms = func(cName string) ([]string, error) {
+		// Check if an entire component is specified
+		if geomsInFrame, ok := frameSystemGeometries[cName]; ok {
+			subNames := []string{}
+			for _, subGeom := range geomsInFrame.Geometries() {
+				subNames = append(subNames, subGeom.Label())
+			}
+			// If this is an entire component, it likely has an origin frame. Collect any origin geometries as well if so.
+			// These will be the geometries that a user specified for this component in their RDK config.
+			originGeoms, err := allowNameToSubGeoms(cName + "_origin")
+			if err == nil && len(originGeoms) > 0 {
+				subNames = append(subNames, originGeoms...)
+			}
+			return subNames, nil
+		}
+		// Check if it's a single sub-component
+		if validGeoms[cName] {
+			return []string{cName}, nil
+		}
+
+		// generate the list of available names to return in error message
+		availNames := make([]string, 0, len(validGeoms))
+		for name := range validGeoms {
+			availNames = append(availNames, name)
+		}
+
+		return nil, fmt.Errorf("geometry specification allow name %s does not match any known geometries. Available: %v", cName, availNames)
+	}
+
+	// Create the structures that specify the allowed collisions
+	for _, collisionSpec := range pbConstraint {
+		for _, allowPair := range collisionSpec.GetAllows() {
+			allow1 := allowPair.GetFrame1()
+			allow2 := allowPair.GetFrame2()
+			allowNames1, err := allowNameToSubGeoms(allow1)
+			if err != nil {
+				return nil, err
+			}
+			allowNames2, err := allowNameToSubGeoms(allow2)
+			if err != nil {
+				return nil, err
+			}
+			for _, allowName1 := range allowNames1 {
+				for _, allowName2 := range allowNames2 {
+					allowedCollisions = append(allowedCollisions, &Collision{name1: allowName1, name2: allowName2})
+				}
+			}
+		}
+	}
+	return allowedCollisions, nil
 }
 
 // geometryGraph is a struct that stores distance relationships between sets of geometries.
@@ -106,12 +212,21 @@ type collisionGraph struct {
 // newCollisionGraph instantiates a collisionGraph object and checks for collisions between the x and y sets of geometries
 // collisions that are reported in the reference CollisionSystem argument will be ignored and not stored as edges in the graph.
 // if the set y is nil, the graph will be instantiated with y = x.
-func newCollisionGraph(x, y map[string]spatial.Geometry, reference *collisionGraph, reportDistances bool) (cg *collisionGraph, err error) {
+func newCollisionGraph(x, y []spatial.Geometry, reference *collisionGraph, reportDistances bool) (cg *collisionGraph, err error) {
 	if y == nil {
 		y = x
 	}
+	xMap, err := createUniqueCollisionMap(x)
+	if err != nil {
+		return nil, err
+	}
+	yMap, err := createUniqueCollisionMap(y)
+	if err != nil {
+		return nil, err
+	}
+
 	cg = &collisionGraph{
-		geometryGraph:   newGeometryGraph(x, y),
+		geometryGraph:   newGeometryGraph(xMap, yMap),
 		reportDistances: reportDistances,
 	}
 
@@ -177,7 +292,25 @@ func (cg *collisionGraph) collisions() []Collision {
 	return collisions
 }
 
-// ignoreCollision finds the specified collision and marks it as something never to check for or report.
+// addCollisionSpecification marks the two objects specified as colliding.
 func (cg *collisionGraph) addCollisionSpecification(specification *Collision) {
-	cg.setDistance(specification.name1, specification.name2, math.NaN())
+	cg.setDistance(specification.name1, specification.name2, math.Inf(-1))
+}
+
+func createUniqueCollisionMap(geoms []spatial.Geometry) (map[string]spatial.Geometry, error) {
+	unnamedCnt := 0
+	geomMap := map[string]spatial.Geometry{}
+
+	for _, geom := range geoms {
+		label := geom.Label()
+		if label == "" {
+			label = unnamedCollisionGeometryPrefix + strconv.Itoa(unnamedCnt)
+			unnamedCnt++
+		}
+		if _, present := geomMap[label]; present {
+			return nil, fmt.Errorf("cannot detect collisions when there are multiple geometries with the same name: %s", label)
+		}
+		geomMap[label] = geom
+	}
+	return geomMap, nil
 }

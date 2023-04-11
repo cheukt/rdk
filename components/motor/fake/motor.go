@@ -9,6 +9,7 @@ import (
 
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
+	"go.viam.com/utils"
 
 	"go.viam.com/rdk/components/board"
 	"go.viam.com/rdk/components/encoder"
@@ -42,7 +43,7 @@ type Config struct {
 	Encoder          string    `json:"encoder,omitempty"`
 	MaxRPM           float64   `json:"max_rpm,omitempty"`
 	TicksPerRotation int       `json:"ticks_per_rotation,omitempty"`
-	DirectionFlip    bool      `json:"direction_flip"`
+	DirectionFlip    bool      `json:"direction_flip,omitempty"`
 }
 
 // Validate ensures all parts of the config are valid.
@@ -50,6 +51,12 @@ func (cfg *Config) Validate(path string) ([]string, error) {
 	var deps []string
 	if cfg.BoardName != "" {
 		deps = append(deps, cfg.BoardName)
+	}
+	if cfg.Encoder != "" {
+		if cfg.TicksPerRotation <= 0 {
+			return nil, utils.NewConfigValidationError(path, errors.New("need nonzero TicksPerRotation for encoded motor"))
+		}
+		deps = append(deps, cfg.Encoder)
 	}
 	return deps, nil
 }
@@ -83,9 +90,6 @@ func init() {
 				}
 
 				if mcfg.Encoder != "" {
-					if mcfg.TicksPerRotation <= 0 {
-						return nil, errors.New("need nonzero TicksPerRotation for encoded motor")
-					}
 					m.TicksPerRotation = mcfg.TicksPerRotation
 
 					e, err := encoder.FromDependencies(deps, mcfg.Encoder)
@@ -147,7 +151,7 @@ func (m *Motor) Position(ctx context.Context, extra map[string]interface{}) (flo
 		return 0, errors.New("encoder is not defined")
 	}
 
-	ticks, err := m.Encoder.TicksCount(ctx, extra)
+	ticks, _, err := m.Encoder.GetPosition(ctx, nil, extra)
 	if err != nil {
 		return 0, err
 	}
@@ -334,7 +338,7 @@ func (m *Motor) ResetZeroPosition(ctx context.Context, offset float64, extra map
 		return errors.New("need nonzero TicksPerRotation for motor")
 	}
 
-	err := m.Encoder.Reset(ctx, offset*float64(m.TicksPerRotation), extra)
+	err := m.Encoder.ResetPosition(ctx, extra)
 	if err != nil {
 		return errors.Wrapf(err, "error in ResetZeroPosition from motor (%s)", m.Name)
 	}

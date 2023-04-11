@@ -3,8 +3,8 @@
     "target": "ESNext",
     "module": "ESNext",
     "useDefineForClassFields": true,
+    "declaration": true,
     "strict": true,
-    "noEmit": true,
     "jsx": "preserve",
     "importHelpers": true,
     "moduleResolution": "Node",
@@ -30,15 +30,14 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
-    "importsNotUsedAsValues": "error",
-    "sourceMap": true,
     "lib": [
       "ESNext",
       "DOM",
       "DOM.iterable",
       "scripthost"
-    ]
+    ],
+    "outDir": "dist",
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"],
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/.vue"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

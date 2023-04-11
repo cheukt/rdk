@@ -2,7 +2,6 @@ package gpio
 
 import (
 	"context"
-	"math"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +13,8 @@ import (
 
 	"go.viam.com/rdk/components/board"
 	fakeboard "go.viam.com/rdk/components/board/fake"
-	"go.viam.com/rdk/components/encoder"
+	"go.viam.com/rdk/components/encoder/incremental"
+	"go.viam.com/rdk/components/encoder/single"
 	"go.viam.com/rdk/components/motor"
 	fakemotor "go.viam.com/rdk/components/motor/fake"
 	"go.viam.com/rdk/config"
@@ -45,7 +45,7 @@ func TestMotorEncoder1(t *testing.T) {
 	}
 	interrupt := &board.BasicDigitalInterrupt{}
 
-	e := &encoder.SingleEncoder{I: interrupt, CancelCtx: context.Background()}
+	e := &single.Encoder{I: interrupt, CancelCtx: context.Background()}
 	e.AttachDirectionalAwareness(&fakeDirectionAware{m: fakeMotor})
 	e.Start(context.Background())
 	dirFMotor, err := NewEncodedMotor(config.Component{}, cfg, fakeMotor, e, logger)
@@ -90,23 +90,32 @@ func TestMotorEncoder1(t *testing.T) {
 	})
 
 	t.Run("encoded motor testing SetPower interrupt GoFor", func(t *testing.T) {
-		test.That(t, _motor.goForInternal(context.Background(), 1000, 1), test.ShouldBeNil)
+		test.That(t, _motor.goForInternal(context.Background(), 1000, 1000), test.ShouldBeNil)
 		test.That(t, fakeMotor.Direction(), test.ShouldEqual, 1)
 		test.That(t, fakeMotor.PowerPct(), test.ShouldBeGreaterThan, float32(0))
 
+		errChan := make(chan error)
+		go func() {
+			ticksErr := interrupt.Ticks(context.Background(), 99, nowNanosTest())
+			errChan <- ticksErr
+		}()
 		testutils.WaitForAssertion(t, func(tb testing.TB) {
 			tb.Helper()
 			test.That(tb, fakeMotor.PowerPct(), test.ShouldEqual, float32(1))
 		})
-
-		test.That(t, interrupt.Ticks(context.Background(), 99, nowNanosTest()), test.ShouldBeNil)
-		test.That(t, fakeMotor.Direction(), test.ShouldEqual, 1)
-
-		_motor.SetPower(context.Background(), .25, nil)
-		test.That(t, interrupt.Ticks(context.Background(), 1000, nowNanosTest()), test.ShouldBeNil) // go far!
+		_motor.SetPower(context.Background(), -0.25, nil)
+		receivedErr := <-errChan
+		test.That(t, receivedErr, test.ShouldBeNil)
+		pos, err := _motor.Position(context.Background(), nil)
+		// should not have reached the final position intended by the
+		// goForInternal call
+		test.That(t, pos, test.ShouldBeLessThan, 1000)
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, fakeMotor.Direction(), test.ShouldEqual, -1)
 	})
 
 	t.Run("encoded motor testing Go (non controlled)", func(t *testing.T) {
+		_motor.ResetZeroPosition(context.Background(), 0, nil)
 		_motor.SetPower(context.Background(), .25, nil)
 		test.That(t, interrupt.Ticks(context.Background(), 1000, nowNanosTest()), test.ShouldBeNil) // go far!
 
@@ -123,7 +132,7 @@ func TestMotorEncoder1(t *testing.T) {
 			tb.Helper()
 			pos, err := _motor.Position(context.Background(), nil)
 			test.That(tb, err, test.ShouldBeNil)
-			test.That(tb, math.Abs(pos-20.99), test.ShouldBeLessThan, 0.01)
+			test.That(tb, pos, test.ShouldAlmostEqual, 10, 0.01)
 		})
 	})
 
@@ -269,7 +278,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 	defer undo()
 
 	type testHarness struct {
-		Encoder   *encoder.IncrementalEncoder
+		Encoder   *incremental.Encoder
 		EncoderA  board.DigitalInterrupt
 		EncoderB  board.DigitalInterrupt
 		RealMotor *fakemotor.Motor
@@ -286,7 +295,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 		}
 		encoderA := &board.BasicDigitalInterrupt{}
 		encoderB := &board.BasicDigitalInterrupt{}
-		encoder := &encoder.IncrementalEncoder{A: encoderA, B: encoderB, CancelCtx: context.Background()}
+		encoder := &incremental.Encoder{A: encoderA, B: encoderB, CancelCtx: context.Background()}
 		encoder.Start(context.Background())
 
 		motorIfc, err := NewEncodedMotor(config.Component{}, cfg, fakeMotor, encoder, logger)
@@ -347,7 +356,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 1)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 0)
 			test.That(tb, err, test.ShouldBeNil)
@@ -358,7 +367,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 2)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -369,7 +378,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 3)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -380,7 +389,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 4)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 2)
 			test.That(tb, err, test.ShouldBeNil)
@@ -407,7 +416,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 1)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 0)
 			test.That(tb, err, test.ShouldBeNil)
@@ -418,7 +427,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 2)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -429,7 +438,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 3)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -440,7 +449,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 4)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 2)
 			test.That(tb, err, test.ShouldBeNil)
@@ -451,7 +460,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 3)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -462,7 +471,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 2)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 1)
 			test.That(tb, err, test.ShouldBeNil)
@@ -473,7 +482,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 1)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 0)
 			test.That(tb, err, test.ShouldBeNil)
@@ -484,7 +493,7 @@ func TestMotorEncoderIncremental(t *testing.T) {
 			tb.Helper()
 			pos := encoder.RawPosition()
 			test.That(tb, pos, test.ShouldEqual, 0)
-			posFl, err := encoder.TicksCount(context.Background(), nil)
+			posFl, _, err := (*encoder).GetPosition(context.Background(), nil, nil)
 			pos = int64(posFl)
 			test.That(tb, pos, test.ShouldEqual, 0)
 			test.That(tb, err, test.ShouldBeNil)
@@ -588,7 +597,7 @@ func TestWrapMotorWithEncoder(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 		fakeMotor := &fakemotor.Motor{}
 		b.Digitals["a"] = &board.BasicDigitalInterrupt{}
-		e := &encoder.SingleEncoder{I: b.Digitals["a"], CancelCtx: context.Background()}
+		e := &single.Encoder{I: b.Digitals["a"], CancelCtx: context.Background()}
 		e.AttachDirectionalAwareness(&fakeDirectionAware{m: fakeMotor})
 		e.Start(context.Background())
 
@@ -615,7 +624,7 @@ func TestWrapMotorWithEncoder(t *testing.T) {
 		fakeMotor := &fakemotor.Motor{}
 		b.Digitals["a"] = &board.BasicDigitalInterrupt{}
 		b.Digitals["b"] = &board.BasicDigitalInterrupt{}
-		e := &encoder.IncrementalEncoder{A: b.Digitals["a"], B: b.Digitals["b"], CancelCtx: context.Background()}
+		e := &incremental.Encoder{A: b.Digitals["a"], B: b.Digitals["b"], CancelCtx: context.Background()}
 		e.Start(context.Background())
 
 		m, err := WrapMotorWithEncoder(
@@ -647,7 +656,7 @@ func TestDirFlipMotor(t *testing.T) {
 	}
 	interrupt := &board.BasicDigitalInterrupt{}
 
-	e := &encoder.SingleEncoder{I: interrupt, CancelCtx: context.Background()}
+	e := &single.Encoder{I: interrupt, CancelCtx: context.Background()}
 	e.AttachDirectionalAwareness(&fakeDirectionAware{m: dirflipFakeMotor})
 	e.Start(context.Background())
 	dirFMotor, err := NewEncodedMotor(config.Component{}, cfg, dirflipFakeMotor, e, logger)
