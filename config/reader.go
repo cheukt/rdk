@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/a8m/envsubst"
 	"github.com/pkg/errors"
@@ -128,6 +129,8 @@ func clearCache(id string) {
 
 type remoteReader struct {
 	client apppb.RobotServiceClient
+
+	initialRead bool
 }
 
 func (rr *remoteReader) readCertificateDataFromCloudGRPC(
@@ -135,6 +138,14 @@ func (rr *remoteReader) readCertificateDataFromCloudGRPC(
 	signalingInsecure bool,
 	cloudConfigFromDisk *Cloud,
 ) (tlsConfig, error) {
+	var cancel func()
+	if rr.initialRead {
+		ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	res, err := rr.client.Certificate(ctx, &apppb.CertificateRequest{Id: cloudConfigFromDisk.ID})
 	if err != nil {
 		// Check cache?
@@ -348,20 +359,33 @@ func ReadLocalConfig(
 type remoteReaderFactory func(
 	ctx context.Context,
 	cloud *Cloud,
+	initialRead bool,
 	logger logging.Logger,
 ) (*remoteReader, func() error, error)
 
 func newRemoteReader(
 	ctx context.Context,
 	cloud *Cloud,
+	initialRead bool,
 	logger logging.Logger,
 ) (*remoteReader, func() error, error) {
-	conn, err := CreateNewGRPCClient(ctx, cloud, logger)
+	var (
+		ctxWithTimeout context.Context
+		cancel         func()
+	)
+	if initialRead {
+		ctxWithTimeout, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+	} else {
+		ctxWithTimeout, cancel = context.WithTimeout(ctx, 5*time.Second)
+
+	}
+	conn, err := CreateNewGRPCClient(ctxWithTimeout, cloud, logger)
 	if err != nil {
+		cancel()
 		return nil, func() error { return nil }, err
 	}
-
-	rr := remoteReader{apppb.NewRobotServiceClient(conn)}
+	cancel()
+	rr := remoteReader{client: apppb.NewRobotServiceClient(conn), initialRead: initialRead}
 	closeFunc := func() error {
 		return conn.Close()
 	}
@@ -402,7 +426,7 @@ func fromReader(
 	}
 
 	if rrFactory != nil && cfgFromDisk.Cloud != nil {
-		rr, closeFunc, err := rrFactory(ctx, cfgFromDisk.Cloud, logger)
+		rr, closeFunc, err := rrFactory(ctx, cfgFromDisk.Cloud, true, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -647,6 +671,15 @@ func (rr *remoteReader) getFromCloudGRPC(ctx context.Context, cloudCfg *Cloud, l
 	agentInfo, err := getAgentInfo()
 	if err != nil {
 		return nil, shouldCheckCacheOnFailure, err
+	}
+
+	var cancel func()
+	if rr.initialRead {
+		ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
 	}
 
 	res, err := rr.client.Config(ctx, &apppb.ConfigRequest{Id: cloudCfg.ID, AgentInfo: agentInfo})
