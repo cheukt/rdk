@@ -48,7 +48,7 @@ func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRun
 	}
 
 	packetLossSublogger := logger.Sublogger("packet-loss")
-	testPacketLoss(ctx, packetLossSublogger, true /* verbose to log successes */)
+	TestPacketLoss(ctx, packetLossSublogger, true /* verbose to log successes */)
 
 	if continueRunningTests {
 		go func() {
@@ -58,7 +58,7 @@ func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRun
 					return
 				case <-time.After(5 * time.Minute):
 					TestDNS(ctx, dnsSublogger, false /* non-verbose to only log failures */)
-					testPacketLoss(ctx, packetLossSublogger, false /* non-verbose to only log failures */)
+					TestPacketLoss(ctx, packetLossSublogger, false /* non-verbose to only log failures */)
 				}
 			}
 		}()
@@ -279,10 +279,10 @@ func probePacketLoss(ctx context.Context, target string, count int) *PacketLossR
 	return result
 }
 
-// testPacketLoss measures packet loss to the default gateway (router) and to
+// TestPacketLoss measures packet loss to the default gateway (router) and to
 // ispProbeTarget as an indicator of ISP/WAN connectivity. If verbose is true,
 // successful results are logged; otherwise only failures are logged.
-func testPacketLoss(ctx context.Context, logger logging.Logger, verbose bool) {
+func TestPacketLoss(ctx context.Context, logger logging.Logger, verbose bool) {
 	type target struct{ ip, desc string }
 
 	var targets []target
