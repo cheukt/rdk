@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -15,15 +16,18 @@ import (
 	"time"
 
 	"github.com/pion/stun"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 
 	"go.viam.com/rdk/logging"
 )
 
-// RunNetworkChecks characterizes the network through a series of DNS, UDP STUN, and TCP
-// STUN network checks. Can and should be run asynchronously with server startup to avoid
-// blocking. Specifying continueRunningTestDNS as true will run DNS network checks every 5
-// minutes in a goroutine non-verbosely after this function completes until context error.
-func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRunningTestDNS bool) {
+// RunNetworkChecks characterizes the network through a series of DNS, UDP STUN, TCP STUN,
+// and packet loss network checks. Can and should be run asynchronously with server startup
+// to avoid blocking. Specifying continueRunningTests as true will run DNS and packet loss
+// checks every 5 minutes in goroutines non-verbosely after this function completes until
+// context error.
+func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRunningTests bool) {
 	logger := rdkLogger.Sublogger("network-checks")
 	if testing.Testing() {
 		logger.Debug("Skipping network checks in a testing environment")
@@ -34,18 +38,6 @@ func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRun
 
 	dnsSublogger := logger.Sublogger("dns")
 	TestDNS(ctx, dnsSublogger, true /* verbose to log successes */)
-	if continueRunningTestDNS {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(5 * time.Minute):
-					TestDNS(ctx, dnsSublogger, false /* non-verbose to only log failures */)
-				}
-			}
-		}()
-	}
 
 	if err := testUDP(ctx, logger.Sublogger("udp")); err != nil {
 		logger.Errorw("Error running udp network tests", "error", err)
@@ -54,10 +46,267 @@ func RunNetworkChecks(ctx context.Context, rdkLogger logging.Logger, continueRun
 	if err := testTCP(ctx, logger.Sublogger("tcp")); err != nil {
 		logger.Errorw("Error running tcp network tests", "error", err)
 	}
+
+	packetLossSublogger := logger.Sublogger("packet-loss")
+	testPacketLoss(ctx, packetLossSublogger, true /* verbose to log successes */)
+
+	if continueRunningTests {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Minute):
+					TestDNS(ctx, dnsSublogger, false /* non-verbose to only log failures */)
+					testPacketLoss(ctx, packetLossSublogger, false /* non-verbose to only log failures */)
+				}
+			}
+		}()
+	}
 }
 
 // All blocking I/O for all network checks gets 5 seconds before being considered a timeout.
 const timeout = 5 * time.Second
+
+// Number of ICMP echo probes sent per host during packet loss tests.
+const packetLossProbeCount = 10
+
+// Timeout per ICMP echo probe.
+const packetLossProbeTimeout = time.Second
+
+// External IP used as a proxy for ISP connectivity. Cloudflare's anycast DNS is
+// positioned at ISP edge PoPs and responds reliably to ICMP.
+const ispProbeTarget = "1.1.1.1"
+
+// getDefaultGateway returns the IP address of the default gateway (router).
+func getDefaultGateway(ctx context.Context) (string, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return getDefaultGatewayLinux()
+	case "darwin":
+		return getDefaultGatewayDarwin(ctx)
+	case "windows":
+		return getDefaultGatewayWindows(ctx)
+	default:
+		return "", fmt.Errorf("unsupported OS for gateway detection: %s", runtime.GOOS)
+	}
+}
+
+// getDefaultGatewayLinux parses /proc/net/route to find the default gateway.
+func getDefaultGatewayLinux() (string, error) {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return "", fmt.Errorf("reading /proc/net/route: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n")[1:] {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != "00000000" {
+			continue
+		}
+		gwBytes, err := hex.DecodeString(fields[2])
+		if err != nil || len(gwBytes) != 4 {
+			continue
+		}
+		// Stored in little-endian byte order.
+		return fmt.Sprintf("%d.%d.%d.%d", gwBytes[3], gwBytes[2], gwBytes[1], gwBytes[0]), nil
+	}
+	return "", fmt.Errorf("default gateway not found in /proc/net/route")
+}
+
+// getDefaultGatewayDarwin uses the route(8) command to find the default gateway on macOS.
+func getDefaultGatewayDarwin(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "route", "-n", "get", "default").Output()
+	if err != nil {
+		return "", fmt.Errorf("running route command: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "gateway:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				return fields[1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("gateway not found in route output")
+}
+
+// getDefaultGatewayWindows uses `route PRINT 0.0.0.0` to find the default gateway on Windows.
+// The output contains rows like:
+//
+//	0.0.0.0   0.0.0.0   192.168.1.1   192.168.1.5   25
+//
+// where the fields are: destination, netmask, gateway, interface, metric.
+func getDefaultGatewayWindows(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "route", "PRINT", "0.0.0.0").Output()
+	if err != nil {
+		return "", fmt.Errorf("running route PRINT: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		// Look for the default route: destination=0.0.0.0, netmask=0.0.0.0.
+		if len(fields) >= 3 && fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
+			return fields[2], nil
+		}
+	}
+	return "", fmt.Errorf("default gateway not found in route PRINT output")
+}
+
+// openICMPConn opens an ICMP packet connection. Tries privileged raw ICMP first
+// ("ip4:icmp"), then falls back to unprivileged ping sockets ("udp4") which work
+// on Linux when net.ipv4.ping_group_range is configured permissively.
+// Returns the connection and the network string used.
+func openICMPConn() (*icmp.PacketConn, string, error) {
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err == nil {
+		return conn, "ip4:icmp", nil
+	}
+	conn, err = icmp.ListenPacket("udp4", "")
+	if err == nil {
+		return conn, "udp4", nil
+	}
+	return nil, "", fmt.Errorf("failed to open ICMP socket (requires root or CAP_NET_RAW): %w", err)
+}
+
+// probePacketLoss sends count ICMP echo requests to target and returns a PacketLossResult.
+// A separate connection per call prevents cross-test reply contamination.
+func probePacketLoss(ctx context.Context, target string, count int) *PacketLossResult {
+	result := &PacketLossResult{Target: target, Sent: count}
+
+	targetIP, err := net.ResolveIPAddr("ip4", target)
+	if err != nil {
+		errStr := fmt.Sprintf("failed to resolve %q: %v", target, err)
+		result.ErrorString = &errStr
+		return result
+	}
+
+	conn, network, err := openICMPConn()
+	if err != nil {
+		errStr := err.Error()
+		result.ErrorString = &errStr
+		return result
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
+		conn.Close() //nolint:errcheck
+	}()
+
+	id := os.Getpid() & 0xffff
+	var received int
+	var totalRTTMS int64
+
+	for seq := 0; seq < count; seq++ {
+		if ctx.Err() != nil {
+			result.Sent = seq
+			break
+		}
+
+		msg := icmp.Message{
+			Type: ipv4.ICMPTypeEcho,
+			Code: 0,
+			Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("viam-rdk")},
+		}
+		wb, err := msg.Marshal(nil)
+		if err != nil {
+			continue
+		}
+
+		var dst net.Addr
+		if network == "udp4" {
+			dst = &net.UDPAddr{IP: targetIP.IP}
+		} else {
+			dst = &net.IPAddr{IP: targetIP.IP}
+		}
+
+		start := time.Now()
+		if _, err := conn.WriteTo(wb, dst); err != nil {
+			continue
+		}
+
+		if err := conn.SetReadDeadline(time.Now().Add(packetLossProbeTimeout)); err != nil {
+			continue
+		}
+
+		rb := make([]byte, 1500)
+		for {
+			n, _, err := conn.ReadFrom(rb)
+			if err != nil {
+				break // timeout or closed; probe counts as lost
+			}
+
+			msgBytes := rb[:n]
+			if network == "ip4:icmp" && n > 20 {
+				// Raw socket includes the IP header; strip it.
+				ihl := int(rb[0]&0x0f) * 4
+				if ihl < n {
+					msgBytes = rb[ihl:n]
+				}
+			}
+
+			rm, err := icmp.ParseMessage(1 /* IPPROTO_ICMP */, msgBytes)
+			if err != nil {
+				continue
+			}
+			if rm.Type != ipv4.ICMPTypeEchoReply {
+				continue
+			}
+			echo, ok := rm.Body.(*icmp.Echo)
+			if !ok || echo.Seq != seq {
+				continue
+			}
+			// For raw sockets we also match on ID; for unprivileged ("udp4") the
+			// kernel rewrites the identifier so we skip that check.
+			if network != "udp4" && echo.ID != id {
+				continue
+			}
+			received++
+			totalRTTMS += time.Since(start).Milliseconds()
+			break
+		}
+	}
+
+	result.Received = received
+	if received > 0 {
+		avg := totalRTTMS / int64(received)
+		result.AvgRTTMS = &avg
+	}
+	return result
+}
+
+// testPacketLoss measures packet loss to the default gateway (router) and to
+// ispProbeTarget as an indicator of ISP/WAN connectivity. If verbose is true,
+// successful results are logged; otherwise only failures are logged.
+func testPacketLoss(ctx context.Context, logger logging.Logger, verbose bool) {
+	type target struct{ ip, desc string }
+
+	var targets []target
+	gatewayIP, err := getDefaultGateway(ctx)
+	if err != nil {
+		logger.Warnw("Could not determine default gateway; skipping router packet loss test", "error", err)
+	} else {
+		targets = append(targets, target{gatewayIP, "router"})
+	}
+	targets = append(targets, target{ispProbeTarget, "ISP (" + ispProbeTarget + ")"})
+
+	var results []*PacketLossResult
+	for _, t := range targets {
+		if ctx.Err() != nil {
+			logger.Info("Shutdown detected; stopping packet loss tests")
+			return
+		}
+		result := probePacketLoss(ctx, t.ip, packetLossProbeCount)
+		result.Description = t.desc
+		results = append(results, result)
+	}
+
+	logPacketLossResults(logger, results, verbose)
+}
 
 var (
 	systemdResolvedAddress = "127.0.0.53:53"

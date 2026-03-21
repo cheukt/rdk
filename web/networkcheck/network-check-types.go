@@ -7,6 +7,74 @@ import (
 	"go.viam.com/rdk/logging"
 )
 
+// PacketLossResult holds the results of a packet loss probe to a specific host.
+type PacketLossResult struct {
+	// Target is the IP address being probed.
+	Target string
+
+	// Description describes the role of the target (e.g., "router", "ISP").
+	Description string
+
+	// Sent is the number of ICMP echo probes sent.
+	Sent int
+
+	// Received is the number of ICMP echo replies received.
+	Received int
+
+	// AvgRTTMS is the average round-trip time in milliseconds across received replies.
+	// Nil if no replies were received.
+	AvgRTTMS *int64
+
+	// ErrorString is set if the test could not be initialized or completed.
+	ErrorString *string
+}
+
+// LossPercent returns the percentage of probes that were lost.
+func (r *PacketLossResult) LossPercent() float64 {
+	if r.Sent == 0 {
+		return 100.0
+	}
+	return float64(r.Sent-r.Received) / float64(r.Sent) * 100.0
+}
+
+func stringifyPacketLossResults(results []*PacketLossResult) string {
+	ret := "["
+	for i, r := range results {
+		comma := ","
+		if i == 0 {
+			comma = ""
+		}
+		ret += fmt.Sprintf("%v{target: %s, description: %s, sent: %d, received: %d, loss_pct: %.0f%%",
+			comma, r.Target, r.Description, r.Sent, r.Received, r.LossPercent())
+		if r.AvgRTTMS != nil {
+			ret += fmt.Sprintf(", avg_rtt_ms: %d", *r.AvgRTTMS)
+		}
+		if r.ErrorString != nil {
+			ret += fmt.Sprintf(", error: %s", *r.ErrorString)
+		}
+		ret += "}"
+	}
+	return ret + "]"
+}
+
+func logPacketLossResults(logger logging.Logger, results []*PacketLossResult, verbose bool) {
+	var anyLoss bool
+	for _, r := range results {
+		if r.ErrorString != nil || r.LossPercent() > 0 {
+			anyLoss = true
+			break
+		}
+	}
+
+	msg := "packet loss tests complete"
+	keysAndValues := []any{"packet_loss_tests", stringifyPacketLossResults(results)}
+	if anyLoss {
+		logger.Warnw(msg, keysAndValues...)
+	} else if verbose {
+		logger.Infow(msg, keysAndValues...)
+	}
+}
+
 type (
 	// DNSTestType is an enumeration of test types.
 	DNSTestType int
