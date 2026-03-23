@@ -73,6 +73,22 @@ func logPacketLossResults(logger logging.Logger, results []*PacketLossResult, ve
 	} else if verbose {
 		logger.Infow(msg, keysAndValues...)
 	}
+
+	// If the router has 100% packet loss but the ISP target is reachable, note that the
+	// gateway is still routing traffic correctly — many routers drop ICMP ping by default.
+	var routerFullLoss, ispReachable bool
+	for _, r := range results {
+		if r.Description == "router" && r.LossPercent() == 100 && r.ErrorString == nil {
+			routerFullLoss = true
+		}
+		if r.Description != "router" && r.LossPercent() == 0 {
+			ispReachable = true
+		}
+	}
+	if routerFullLoss && ispReachable {
+		logger.Info("gateway is not responding to ICMP ping, but internet connectivity appears normal; " +
+			"many routers block ping by default")
+	}
 }
 
 type (
