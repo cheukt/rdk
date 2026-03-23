@@ -66,14 +66,6 @@ func logPacketLossResults(logger logging.Logger, results []*PacketLossResult, ve
 		}
 	}
 
-	msg := "packet loss tests complete"
-	keysAndValues := []any{"packet_loss_tests", stringifyPacketLossResults(results)}
-	if anyLoss {
-		logger.Warnw(msg, keysAndValues...)
-	} else if verbose {
-		logger.Infow(msg, keysAndValues...)
-	}
-
 	// If the router has 100% packet loss but the ISP target is reachable, note that the
 	// gateway is still routing traffic correctly — many routers drop ICMP ping by default.
 	var routerFullLoss, ispReachable bool
@@ -85,9 +77,18 @@ func logPacketLossResults(logger logging.Logger, results []*PacketLossResult, ve
 			ispReachable = true
 		}
 	}
+
+	msg := "packet loss tests complete"
+	keysAndValues := []any{"packet_loss_tests", stringifyPacketLossResults(results)}
 	if routerFullLoss && ispReachable {
-		logger.Info("gateway is not responding to ICMP ping, but internet connectivity appears normal; " +
-			"many routers block ping by default")
+		keysAndValues = append(keysAndValues,
+			"note", "gateway is not responding to ICMP ping, but internet connectivity appears normal; many routers block ping by default",
+		)
+	}
+	if anyLoss {
+		logger.Warnw(msg, keysAndValues...)
+	} else if verbose {
+		logger.Infow(msg, keysAndValues...)
 	}
 }
 
