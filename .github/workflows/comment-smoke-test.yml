@@ -1,0 +1,47 @@
+name: Comment Smoke Test
+
+# Throwaway: verifies the marocchino sticky-comment step + message rendering
+# used by static-comment/appimage-comment in pullrequest-trusted.yml. Uses
+# GITHUB_TOKEN (fork default perms = write) instead of PR_TOKEN. Delete after.
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to post the sticky comment on
+        required: true
+
+permissions:
+  pull-requests: write
+
+jobs:
+  static-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post or update sticky PR comment
+        # marocchino/sticky-pull-request-comment@v3.0.4
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0
+        with:
+          header: static-build-urls
+          number: ${{ inputs.pr_number }}
+          message: |
+            ### Built Static Binaries for pr-${{ inputs.pr_number }}
+
+            - arm64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-aarch64
+            - x86_64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-x86_64
+            - windows x86_64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-windows-x86_64
+            - macOS arm64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-darwin-aarch64
+
+  appimage-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post or update sticky PR comment
+        # marocchino/sticky-pull-request-comment@v3.0.4
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0
+        with:
+          header: appimage-build-urls
+          number: ${{ inputs.pr_number }}
+          message: |
+            ### Built AppImages for pr-${{ inputs.pr_number }}
+
+            - arm64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-aarch64.AppImage
+            - x86_64: https://storage.googleapis.com/packages.viam.com/apps/viam-server/viam-server-pr-${{ inputs.pr_number }}-x86_64.AppImage
