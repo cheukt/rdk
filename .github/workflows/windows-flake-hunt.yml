@@ -1,0 +1,44 @@
+# Throwaway: runs the Windows allowlist N times in parallel to shake out flakes.
+# Lives on a fork only. Do not merge upstream.
+name: Windows Flake Hunt
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    name: windows run ${{ matrix.run }}
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: test
+      shell: bash
+      env:
+        GOFLAGS: "-tags=no_cgo"
+      run: |
+        # No SKIP_* filters: this is the strictest form of the allowlist,
+        # so `module` is exercised too.
+        ALL_PACKAGES=$(go list ./...)
+        WINDOWS_PACKAGES=$(tr -d '\r' < etc/windows_test_packages.txt | awk 'NF && $1 !~ /^#/ {print $1}')
+        UNKNOWN=$(echo "$WINDOWS_PACKAGES" | grep -xvF "$ALL_PACKAGES" || true)
+        if [[ -n "$UNKNOWN" ]]; then
+          echo "stale entries:" 1>&2; echo "$UNKNOWN" 1>&2; exit 1
+        fi
+        TEST_TARGET=$(echo "$ALL_PACKAGES" | grep -xF "$WINDOWS_PACKAGES")
+        echo "Running $(echo "$TEST_TARGET" | wc -l) packages"
+        go run gotest.tools/gotestsum --format standard-verbose --jsonfile json.log $TEST_TARGET
+
+    - name: Upload test.json
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: json-run-${{ matrix.run }}
+        path: json.log
+        retention-days: 7
