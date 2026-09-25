@@ -76,7 +76,6 @@ go.viam.com/rdk/protoutils
 go.viam.com/rdk/referenceframe
 go.viam.com/rdk/robot
 go.viam.com/rdk/robot/framesystem
-go.viam.com/rdk/robot/jobmanager
 go.viam.com/rdk/robot/server
 go.viam.com/rdk/robot/web/stream
 go.viam.com/rdk/robot/web/stream/camera
