@@ -18,10 +18,21 @@ jobs:
     - uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
+
+    # Mirrors the Setup Zig Compiler step in test.yml's test_win job.
+    - name: Setup Zig Compiler
+      # mlugg/setup-zig@v2.2.1
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+      with:
+        version: 0.16.0
+
     - name: test
       shell: bash
       env:
         GOFLAGS: "-tags=no_cgo"
+        CGO_ENABLED: "1"
+        CC: "zig cc"
+        CXX: "zig c++"
       run: |
         # No SKIP_* filters: this is the strictest form of the allowlist,
         # so `module` is exercised too.
