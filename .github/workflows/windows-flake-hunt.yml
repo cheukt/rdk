@@ -9,6 +9,9 @@ jobs:
   hunt:
     name: windows run ${{ matrix.run }}
     runs-on: windows-2025
+    # Passing jobs finish in 8-19 min. A hang otherwise squats on a runner for hours:
+    # three did exactly that in run 36488179233 before being reaped externally.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
