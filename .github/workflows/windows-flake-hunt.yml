@@ -1,0 +1,63 @@
+# Throwaway: runs the Windows allowlist N times in parallel to shake out flakes.
+# Lives on a fork only. Do not merge upstream.
+name: Windows Flake Hunt
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    name: windows run ${{ matrix.run }}
+    runs-on: windows-2025
+    # Passing jobs finish in 8-19 min. A hang otherwise squats on a runner for hours:
+    # three did exactly that in run 36488179233 before being reaped externally.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    # Mirrors the MinGW-w64 setup in test.yml's test_win job (Zig was removed in #6576).
+    - name: Setup MinGW-w64
+      id: msys2
+      # msys2/setup-msys2@v2.33.0
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+      with:
+        msystem: UCRT64
+        install: mingw-w64-ucrt-x86_64-gcc
+
+    - name: Add MinGW-w64 to PATH
+      # the test step runs in Git Bash, not the msys2 shell, so cgo needs gcc/g++ on PATH
+      shell: bash
+      run: echo "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" >> "$GITHUB_PATH"
+
+    - name: test
+      shell: bash
+      env:
+        GOFLAGS: "-tags=no_cgo"
+        CGO_ENABLED: "1"
+      run: |
+        # No SKIP_* filters: this is the strictest form of the allowlist,
+        # so `module` is exercised too.
+        ALL_PACKAGES=$(go list ./...)
+        WINDOWS_PACKAGES=$(tr -d '\r' < etc/windows_test_packages.txt | awk 'NF && $1 !~ /^#/ {print $1}')
+        UNKNOWN=$(echo "$WINDOWS_PACKAGES" | grep -xvF "$ALL_PACKAGES" || true)
+        if [[ -n "$UNKNOWN" ]]; then
+          echo "stale entries:" 1>&2; echo "$UNKNOWN" 1>&2; exit 1
+        fi
+        TEST_TARGET=$(echo "$ALL_PACKAGES" | grep -xF "$WINDOWS_PACKAGES")
+        echo "Running $(echo "$TEST_TARGET" | wc -l) packages"
+        go run gotest.tools/gotestsum --format standard-verbose --jsonfile json.log $TEST_TARGET
+
+    - name: Upload test.json
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: json-run-${{ matrix.run }}
+        path: json.log
+        retention-days: 7
